@@ -750,6 +750,7 @@ void destroy_device(Device* device) noexcept
 }
 
 const DeviceCaps& get_device_caps(const Device* device) noexcept { return device->caps; }
+VulkanHandles get_vulkan_handles(const Device*, uint32) noexcept { return {}; }
 bool get_calibrated_timestamps(Device*, CalibratedTimestamps& out) noexcept { out = {}; return false; }
 void begin_debug_label(CommandBuffer*, const char*) noexcept {}
 void end_debug_label(CommandBuffer*) noexcept {}
@@ -1007,6 +1008,16 @@ void initialize_texture(CommandBuffer* commands, Texture* texture) noexcept
     (void)commands;
     (void)texture;
 }
+
+// External images (OpenXR's Vulkan swapchains) are a Vulkan feature
+Texture* create_external_texture(Device*, const TextureDesc&, void*) noexcept
+{
+    report_error("external textures are unsupported", nil);
+    return nullptr;
+}
+
+void begin_external_access(CommandBuffer*, Texture*) noexcept {}
+void end_external_access(CommandBuffer*, Texture*) noexcept {}
 
 RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc) noexcept
 {
