@@ -463,6 +463,7 @@ struct DeviceCaps
     uint32 integer_sample_counts = 1;
     uint32 max_multiview_view_count = 0; // Views in RenderingDesc::view_mask; zero when multiview rendering is unavailable.
     uint32 max_mesh_multiview_view_count = 0; // Views in MeshPSODesc::view_mask; zero when mesh PSOs cannot use multiview.
+    float max_sampler_anisotropy = 1.0f; // The largest SamplerDesc::max_anisotropy that takes effect.
 };
 
 enum class ColorSpace : uint32 { srgb, extended_srgb_linear };
@@ -575,6 +576,8 @@ struct SamplerDesc
     AddressMode address_v = AddressMode::repeat;
     AddressMode address_w = AddressMode::repeat;
     bool anisotropic = false; // Uses the API's fixed 4x profile.
+    uint8 max_anisotropy = 0; // 2 to 16: anisotropic filtering at this level (clamped to DeviceCaps::max_sampler_anisotropy), whatever
+                              // anisotropic says; 0 or 1 keeps anisotropic's profile.
     bool compare_enabled = false;
     CompareOp compare = CompareOp::less_equal;
 };

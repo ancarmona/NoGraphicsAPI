@@ -613,6 +613,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         for (uint32 count = 1; count <= 8; ++count)
             if ([device->metal supportsVertexAmplificationCount:count]) device->caps.max_multiview_view_count = count;
         device->caps.max_mesh_multiview_view_count = device->caps.max_multiview_view_count;
+        device->caps.max_sampler_anisotropy = 16.0f; // MTLSamplerDescriptor.maxAnisotropy: 1 to 16
         if (desc.window)
         {
             device->layer = [(CAMetalLayer*)desc.window retain];
@@ -1095,7 +1096,7 @@ void write_sampler_descriptor(SamplerDescriptorHeap* heap, uint32 index, const S
         sampler.sAddressMode = address_modes[static_cast<uint32>(desc.address_u)];
         sampler.tAddressMode = address_modes[static_cast<uint32>(desc.address_v)];
         sampler.rAddressMode = address_modes[static_cast<uint32>(desc.address_w)];
-        sampler.maxAnisotropy = desc.anisotropic ? 4 : 1;
+        sampler.maxAnisotropy = desc.max_anisotropy > 1 ? (desc.max_anisotropy < 16 ? desc.max_anisotropy : 16) : desc.anisotropic ? 4 : 1;
         sampler.compareFunction = desc.compare_enabled ? static_cast<MTLCompareFunction>(desc.compare) : MTLCompareFunctionNever;
         sampler.supportArgumentBuffers = YES;
         id<MTLSamplerState> state = [heap->device->metal newSamplerStateWithDescriptor:sampler];
