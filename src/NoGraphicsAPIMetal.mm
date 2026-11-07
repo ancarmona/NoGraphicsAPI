@@ -4,6 +4,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include <TargetConditionals.h>
 #include <mach/mach_time.h>
+#include <time.h>
 #include <os/lock.h>
 #include <assert.h>
 #include <stdio.h>
@@ -675,7 +676,31 @@ void destroy_device(Device* device) noexcept
 
 const DeviceCaps& get_device_caps(const Device* device) noexcept { return device->caps; }
 VulkanHandles get_vulkan_handles(const Device*, uint32) noexcept { return {}; }
-bool get_calibrated_timestamps(Device*, CalibratedTimestamps& out) noexcept { out = {}; return false; }
+// [MTLDevice sampleTimestamps:gpuTimestamp:] gives both in nanoseconds of the Mach absolute clock (CLOCK_UPTIME_RAW; checked on an
+// M5 Max), while write_timestamp's counter heap counts Mach ticks (timestamp_period_ns, the timebase). The host side goes to
+// CLOCK_MONOTONIC_RAW, which also counts the time asleep: the offset between the two clocks is read on both sides of the sample
+bool get_calibrated_timestamps(Device* device, CalibratedTimestamps& out) noexcept
+{
+    out = {};
+    @autoreleasepool
+    {
+        const uint64 raw_before = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+        const uint64 uptime_before = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        MTLTimestamp cpu = 0, gpu = 0;
+        [device->metal sampleTimestamps:&cpu gpuTimestamp:&gpu];
+        const uint64 uptime_after = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        const uint64 raw_after = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+        if (!cpu || !gpu) return false;
+        const uint64 asleep = ((raw_before - uptime_before) + (raw_after - uptime_after)) / 2;
+        mach_timebase_info_data_t timebase = {};
+        mach_timebase_info(&timebase);
+        out.gpu = static_cast<uint64>((static_cast<unsigned __int128>(gpu) * timebase.denom) / timebase.numer);
+        out.host = cpu + asleep;
+        out.max_deviation_ns = (uptime_after - uptime_before) + (raw_after - raw_before);
+        out.host_domain = HostTimeDomain::clock_monotonic_raw;
+        return true;
+    }
+}
 void begin_debug_label(CommandBuffer*, const char*) noexcept {}
 void end_debug_label(CommandBuffer*) noexcept {}
 

@@ -865,6 +865,7 @@ enum class HostTimeDomain : uint8
     none,
     query_performance_counter,
     clock_monotonic,
+    clock_monotonic_raw, // macOS: nanoseconds of CLOCK_MONOTONIC_RAW (it counts sleep, unlike the Mach absolute time)
 };
 
 // A GPU timestamp (the ticks write_timestamp gives) and the host clock, sampled together (VK_KHR_calibrated_timestamps)
@@ -876,7 +877,7 @@ struct CalibratedTimestamps
     HostTimeDomain host_domain = HostTimeDomain::none;
 };
 
-// False, leaving out empty, when the device has no calibrated timestamps (Vulkan without the extension, Metal for now).
+// False, leaving out empty, when the device has no calibrated timestamps (Vulkan without the extension).
 // Tools align GPU timestamps to the CPU timeline with it: host time = host + (ticks - gpu) * timestamp_period_ns.
 [[nodiscard]] bool get_calibrated_timestamps(Device* device, CalibratedTimestamps& out) noexcept;
 
