@@ -678,6 +678,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
             .indirect_mesh_draw = [device->metal supportsFamily:MTLGPUFamilyApple9],
             .storage_push_constant16 = false,
         };
+        device->caps.max_sampler_anisotropy = 16.0f; // MTLSamplerDescriptor.maxAnisotropy: 1 to 16
         if (desc.window)
         {
             device->layer = [(CAMetalLayer*)desc.window retain];
@@ -1158,7 +1159,7 @@ void write_sampler_descriptor(SamplerDescriptorHeap* heap, uint32 index, const S
         sampler.sAddressMode = address_modes[static_cast<uint32>(desc.address_u)];
         sampler.tAddressMode = address_modes[static_cast<uint32>(desc.address_v)];
         sampler.rAddressMode = address_modes[static_cast<uint32>(desc.address_w)];
-        sampler.maxAnisotropy = desc.anisotropic ? 4 : 1;
+        sampler.maxAnisotropy = desc.max_anisotropy > 1 ? (desc.max_anisotropy < 16 ? desc.max_anisotropy : 16) : desc.anisotropic ? 4 : 1;
         sampler.compareFunction = desc.compare_enabled ? static_cast<MTLCompareFunction>(desc.compare) : MTLCompareFunctionNever;
         sampler.supportArgumentBuffers = YES;
         id<MTLSamplerState> state = [heap->device->metal newSamplerStateWithDescriptor:sampler];
