@@ -76,6 +76,10 @@ baseline. Native indirect mesh drawing requires Apple9 (A17 Pro / M3) or newer a
 `DeviceCaps::indirect_mesh_draw`. M1/M2 applications can launch direct task groups that read GPU-produced
 counts; NoGraphicsAPI does not emulate an indirect command.
 
+Multisampling and multiview are Vulkan-only for now. Metal reports `DeviceCaps::sample_counts` and
+`integer_sample_counts` as 1 and both multiview view counts as zero. Multisample textures, render views with more than
+one layer, and PSOs with `sample_count`, `alpha_to_coverage` or `view_mask` fail creation through the error callback.
+
 Metal 4 does not imply BC texture compression support. Query the required texture formats before
 choosing assets; ASTC is available throughout the baseline.
 

@@ -34,6 +34,8 @@ still needs. NoGraphicsAPI makes that alternative data model the foundation of t
   permutations. Rasterization, blending, and attachment formats still belong to pipeline objects.
 - **Barriers without resource lists.** Synchronization describes which work produces and consumes
   data, not a list of buffer and image transitions. Applications do not track image layouts.
+- **MSAA and multiview (Vulkan).** Multisample color, integer and depth attachments that shaders read per sample,
+  alpha-to-coverage, and view-mask rendering into texture arrays with `SV_ViewID`. Resolves are application shaders.
 
 This is a low-level library: the application still owns allocation policy, resource lifetime, and
 GPU synchronization. The optional NoGraphicsAPIUtility library supplies shared shader types, math,
