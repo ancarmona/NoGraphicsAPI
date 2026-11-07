@@ -313,7 +313,8 @@ static_assert(sizeof(gpu::TextureFormatInfo) == 16 &&
               offsetof(gpu::TextureFormatInfo, bytes_per_block) == 8 &&
               offsetof(gpu::TextureFormatInfo, stencil) == 13);
 static_assert(sizeof(gpu::SwapchainFrame) == 16 && offsetof(gpu::SwapchainFrame, extent) == 8);
-static_assert(sizeof(gpu::TextureDesc) == 32 && offsetof(gpu::TextureDesc, extent) == 4 && offsetof(gpu::TextureDesc, usage) == 28);
+static_assert(sizeof(gpu::TextureDesc) == 32 && offsetof(gpu::TextureDesc, extent) == 4 && offsetof(gpu::TextureDesc, sample_count) == 25 &&
+              offsetof(gpu::TextureDesc, usage) == 28);
 static_assert(sizeof(gpu::TextureCopyDesc) == 56 && offsetof(gpu::TextureCopyDesc, offset) == 12 &&
               offsetof(gpu::TextureCopyDesc, extent) == 24);
 static_assert(sizeof(gpu::Viewport) == 24 && alignof(gpu::Viewport) == 4 &&
@@ -342,6 +343,8 @@ static_assert(default_caps.device_name == nullptr && default_caps.max_push_data_
               default_caps.texture_heap_alignment == 0 &&
               !default_caps.texture_compression_bc &&
               !default_caps.texture_compression_astc && !default_caps.storage_input_output16 && !default_caps.indirect_mesh_draw);
+static_assert(default_caps.sample_counts == 1 && default_caps.integer_sample_counts == 1 && default_caps.max_multiview_view_count == 0 &&
+              default_caps.max_mesh_multiview_view_count == 0);
 constexpr gpu::DeviceInit default_device_init{};
 static_assert(default_device_init.device == nullptr &&
               default_device_init.error == gpu::Error::none);
@@ -364,7 +367,7 @@ constexpr gpu::TextureDesc default_texture{};
 static_assert(default_texture.type == gpu::TextureType::two_d && default_texture.extent.x == 1 &&
               default_texture.extent.y == 1 && default_texture.extent.z == 1 &&
               default_texture.mip_levels == 1 && default_texture.layer_count == 1 &&
-              default_texture.format == gpu::Format::rgba8_unorm &&
+              default_texture.format == gpu::Format::rgba8_unorm && default_texture.sample_count == 1 &&
               !default_texture.mutable_format &&
               default_texture.usage == gpu::TextureUsage::sampled);
 constexpr gpu::TextureDesc mutable_texture{.mutable_format = true};
@@ -377,7 +380,7 @@ static_assert(sized_texture.type == gpu::TextureType::two_d && sized_texture.ext
               sized_texture.extent.y == 32 && sized_texture.extent.z == 1 &&
               sized_texture.mip_levels == 1);
 constexpr gpu::RenderViewDesc default_render_view{};
-static_assert(default_render_view.mip_level == 0 && default_render_view.slice == 0);
+static_assert(default_render_view.mip_level == 0 && default_render_view.slice == 0 && default_render_view.layer_count == 1);
 constexpr gpu::TextureDescriptorDesc default_texture_descriptor{};
 static_assert(default_texture_descriptor.format == gpu::Format::undefined &&
               default_texture_descriptor.aspect == gpu::TextureAspect::automatic &&
@@ -443,14 +446,16 @@ static_assert(default_graphics_pso.vertex.code.size == 0 &&
               default_graphics_pso.fragment.code.size == 0 &&
               default_graphics_pso.color_targets.size == 0 &&
               default_graphics_pso.depth_format == gpu::Format::undefined &&
-              default_graphics_pso.stencil_format == gpu::Format::undefined);
+              default_graphics_pso.stencil_format == gpu::Format::undefined && default_graphics_pso.sample_count == 1 &&
+              !default_graphics_pso.alpha_to_coverage && default_graphics_pso.view_mask == 0);
 constexpr gpu::MeshPSODesc default_mesh_pso{};
 static_assert(default_mesh_pso.task.code.data == nullptr && default_mesh_pso.task.code.size == 0 &&
               default_mesh_pso.mesh.code.size == 0 &&
               default_mesh_pso.fragment.code.size == 0 &&
               default_mesh_pso.color_targets.size == 0 &&
               default_mesh_pso.depth_format == gpu::Format::undefined &&
-              default_mesh_pso.stencil_format == gpu::Format::undefined);
+              default_mesh_pso.stencil_format == gpu::Format::undefined && default_mesh_pso.sample_count == 1 &&
+              !default_mesh_pso.alpha_to_coverage && default_mesh_pso.view_mask == 0);
 constexpr gpu::ColorAttachment default_color_attachment{};
 static_assert(default_color_attachment.render_view == nullptr &&
               default_color_attachment.load == gpu::LoadOp::load &&
@@ -471,7 +476,7 @@ static_assert(default_stencil_attachment.render_view == nullptr &&
 constexpr gpu::RenderingDesc default_rendering{};
 static_assert(default_rendering.colors.size == 0 &&
               default_rendering.depth.render_view == nullptr &&
-              default_rendering.stencil.render_view == nullptr);
+              default_rendering.stencil.render_view == nullptr && default_rendering.view_mask == 0);
 
 constexpr gpu::GpuRange default_range{};
 constexpr gpu::GpuCpuRange<gpu::byte> default_cpu_range{};

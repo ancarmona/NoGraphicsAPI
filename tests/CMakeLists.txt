@@ -308,6 +308,47 @@ add_test(NAME test_shader_abi COMMAND test_shader_abi)
 set_tests_properties(test_shader_abi PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
 
 if(NOT APPLE)
+    # MSAA and multiview are Vulkan-only; the Metal backend reports them unsupported.
+    set(msaa_vertex_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/msaa.vert.spv)
+    set(msaa_fragment_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/msaa.frag.spv)
+    set(msaa_read_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/msaa_read.comp.spv)
+    NoGraphicsAPI_compile_slang(${msaa_vertex_spv} ${CMAKE_CURRENT_SOURCE_DIR}/msaa.slang vertexMain vertex
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/msaa_shared.h ${CMAKE_CURRENT_SOURCE_DIR}/msaa_common.h)
+    NoGraphicsAPI_compile_slang(${msaa_fragment_spv} ${CMAKE_CURRENT_SOURCE_DIR}/msaa.slang fragmentMain fragment
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/msaa_shared.h ${CMAKE_CURRENT_SOURCE_DIR}/msaa_common.h)
+    NoGraphicsAPI_compile_slang(${msaa_read_spv} ${CMAKE_CURRENT_SOURCE_DIR}/msaa_read.slang computeMain compute
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/msaa_read_shared.h ${CMAKE_CURRENT_SOURCE_DIR}/msaa_common.h)
+    add_executable(test_msaa msaa_test.cpp ${msaa_vertex_spv} ${msaa_fragment_spv} ${msaa_read_spv})
+    NoGraphicsAPI_disable_exceptions(test_msaa)
+    target_link_libraries(test_msaa PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::types)
+    target_compile_definitions(test_msaa PRIVATE NOGRAPHICSAPI_MSAA_VERTEX="${msaa_vertex_spv}"
+        NOGRAPHICSAPI_MSAA_FRAGMENT="${msaa_fragment_spv}" NOGRAPHICSAPI_MSAA_READ="${msaa_read_spv}")
+    add_test(NAME test_msaa COMMAND test_msaa)
+
+    set(multiview_vertex_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/multiview.vert.spv)
+    set(multiview_mesh_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/multiview.mesh.spv)
+    set(multiview_fragment_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/multiview.frag.spv)
+    set(multiview_read_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/multiview_read.comp.spv)
+    NoGraphicsAPI_compile_slang(${multiview_vertex_spv} ${CMAKE_CURRENT_SOURCE_DIR}/multiview.slang vertexMain vertex
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/multiview_common.h)
+    NoGraphicsAPI_compile_slang(${multiview_mesh_spv} ${CMAKE_CURRENT_SOURCE_DIR}/multiview.slang meshMain mesh
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/multiview_common.h)
+    NoGraphicsAPI_compile_slang(${multiview_fragment_spv} ${CMAKE_CURRENT_SOURCE_DIR}/multiview.slang fragmentMain fragment
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/multiview_common.h)
+    NoGraphicsAPI_compile_slang(${multiview_read_spv} ${CMAKE_CURRENT_SOURCE_DIR}/multiview_read.slang computeMain compute
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/multiview_read_shared.h ${CMAKE_CURRENT_SOURCE_DIR}/multiview_common.h)
+    add_executable(test_multiview multiview_test.cpp ${multiview_vertex_spv} ${multiview_mesh_spv} ${multiview_fragment_spv} ${multiview_read_spv})
+    NoGraphicsAPI_disable_exceptions(test_multiview)
+    target_link_libraries(test_multiview PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::types)
+    target_compile_definitions(test_multiview PRIVATE NOGRAPHICSAPI_MULTIVIEW_VERTEX="${multiview_vertex_spv}"
+        NOGRAPHICSAPI_MULTIVIEW_MESH="${multiview_mesh_spv}" NOGRAPHICSAPI_MULTIVIEW_FRAGMENT="${multiview_fragment_spv}"
+        NOGRAPHICSAPI_MULTIVIEW_READ="${multiview_read_spv}")
+    add_test(NAME test_multiview COMMAND test_multiview)
+    set_tests_properties(test_msaa test_multiview PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
+endif()
+
+if(NOT APPLE)
     # Compile Vulkan buffer commands separately so production selection prefers native address commands.
     add_library(NoGraphicsAPI_buffer_commands STATIC ${PROJECT_SOURCE_DIR}/${NoGraphicsAPI_backend_source})
     target_compile_features(NoGraphicsAPI_buffer_commands PUBLIC cxx_std_20)
@@ -320,7 +361,7 @@ if(NOT APPLE)
         NOGRAPHICSAPI_TEST_BUFFER_COMMANDS $<TARGET_PROPERTY:NoGraphicsAPI,COMPILE_DEFINITIONS>)
 
     set(buffer_command_tests test_command_addresses test_texture_copy test_texture_alias test_root_data test_task_shader test_render_continuation
-        test_command_context test_timeline_retirement test_multithreading test_queue_families test_shader_abi)
+        test_command_context test_timeline_retirement test_multithreading test_queue_families test_shader_abi test_msaa test_multiview)
     foreach(original IN LISTS buffer_command_tests)
         get_target_property(test_sources ${original} SOURCES)
         list(FILTER test_sources INCLUDE REGEX "\\.(cpp|mm)$")
