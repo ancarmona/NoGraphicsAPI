@@ -150,6 +150,7 @@ enum class Format : uint8
     astc_4x4_unorm,
     bc3_srgb,
     bc3_unorm,
+    bc4_r, // one channel, 8 bytes per block
     bc5_rg,
     bc6h_ufloat,
     bc6h_sfloat,
@@ -235,6 +236,11 @@ struct TextureFormatInfo
         return {
             .block_extent = {.x = 1, .y = 1},
             .bytes_per_block = 16,
+        };
+    case Format::bc4_r:
+        return {
+            .block_extent = {.x = 4, .y = 4},
+            .bytes_per_block = 8,
         };
     case Format::eac_rg:
     case Format::astc_4x4_srgb:
