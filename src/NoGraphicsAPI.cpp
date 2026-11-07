@@ -698,6 +698,12 @@ struct Device
     uint32 texture_memory_type = VK_MAX_MEMORY_TYPES;
     detail::DeviceFunctions fn;
     detail::BufferAddressMap* buffer_map = nullptr;
+    // VK_KHR_calibrated_timestamps (or the EXT): the GPU timestamp and a host clock read together
+    PFN_vkGetCalibratedTimestampsKHR get_calibrated_timestamps = nullptr;
+    VkTimeDomainKHR host_time_domain = VK_TIME_DOMAIN_DEVICE_KHR;
+    // VK_EXT_debug_utils command labels, for tools (Nsight, RenderDoc); null without the extension
+    PFN_vkCmdBeginDebugUtilsLabelEXT cmd_begin_label = nullptr;
+    PFN_vkCmdEndDebugUtilsLabelEXT cmd_end_label = nullptr;
     DeviceCaps caps;
     VkFormatFeatureFlags2 format_features[format_count]{};
     bool texture_compression_etc2 = false;
@@ -1832,6 +1838,8 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     constexpr bool khr_surface_maintenance1 = false;
     constexpr bool ext_surface_maintenance1 = false;
 #endif
+    // Debug labels in every build when the loader has the extension; the validation messenger stays a debug build's
+    const bool debug_labels_available = has_name({instance_extensions, instance_extension_count}, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 #if !defined(NDEBUG)
     VkLayerProperties layers[max_instance_layers]{};
     uint32 layer_count = 0;
@@ -1846,8 +1854,8 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     uint32 enabled_instance_extension_count = 0;
     const char* enabled_layers[1]{};
     uint32 enabled_layer_count = 0;
+    if (debug_labels_available) enabled_instance_extensions[enabled_instance_extension_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
 #if !defined(NDEBUG)
-    if (debug_utils_available) enabled_instance_extensions[enabled_instance_extension_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     if (validation_available) enabled_layers[enabled_layer_count++] = "VK_LAYER_KHRONOS_validation";
 #endif
 #if defined(_WIN32)
@@ -2034,8 +2042,24 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         };
         first_queue += queue_counts[type];
     }
-    const char* enabled_device_extensions[7]{};
+    const char* enabled_device_extensions[8]{};
     uint32 enabled_device_extension_count = 0;
+    // Calibrated timestamps, to put GPU timestamps on the CPU clock; optional
+    const char* calibrated_extension = nullptr;
+    {
+        uint32 count = 0;
+        vkEnumerateDeviceExtensionProperties(state->physical_device, nullptr, &count, nullptr);
+        VkExtensionProperties* properties = static_cast<VkExtensionProperties*>(malloc(sizeof(VkExtensionProperties) * (count ? count : 1)));
+        if (properties && vkEnumerateDeviceExtensionProperties(state->physical_device, nullptr, &count, properties) == VK_SUCCESS)
+        {
+            if (has_name({properties, count}, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME))
+                calibrated_extension = VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+            else if (has_name({properties, count}, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME))
+                calibrated_extension = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+        }
+        free(properties);
+    }
+    if (calibrated_extension) enabled_device_extensions[enabled_device_extension_count++] = calibrated_extension;
     enabled_device_extensions[enabled_device_extension_count++] = VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME;
     if (selected.address_commands) enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_DEVICE_ADDRESS_COMMANDS_EXTENSION_NAME;
     enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME;
@@ -2078,6 +2102,40 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     }
     if (!supports_gpu_heap_memory(*state) || !select_texture_memory_type(*state))
         return fail_device_creation(state, Error::unsupported);
+
+    if (calibrated_extension)
+    {
+        const bool khr = strcmp(calibrated_extension, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0;
+        const auto get_domains = load_instance_proc<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR>(state->instance,
+            khr ? "vkGetPhysicalDeviceCalibrateableTimeDomainsKHR" : "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT");
+        state->get_calibrated_timestamps = load_device_proc<PFN_vkGetCalibratedTimestampsKHR>(state->device,
+            khr ? "vkGetCalibratedTimestampsKHR" : "vkGetCalibratedTimestampsEXT");
+        VkTimeDomainKHR domains[8]{};
+        uint32 domain_count = 8;
+        bool device_domain = false;
+        if (get_domains && get_domains(state->physical_device, &domain_count, domains) >= VK_SUCCESS)
+        {
+            for (uint32 index = 0; index < domain_count; ++index)
+            {
+                device_domain |= domains[index] == VK_TIME_DOMAIN_DEVICE_KHR;
+                // The host clock of the platform's monotonic time: QueryPerformanceCounter, or CLOCK_MONOTONIC
+                if (domains[index] == VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR || domains[index] == VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR)
+                    state->host_time_domain = domains[index];
+            }
+        }
+        if (!device_domain || state->host_time_domain == VK_TIME_DOMAIN_DEVICE_KHR)
+            state->get_calibrated_timestamps = nullptr;
+    }
+    if (debug_labels_available)
+    {
+        state->cmd_begin_label = load_instance_proc<PFN_vkCmdBeginDebugUtilsLabelEXT>(state->instance, "vkCmdBeginDebugUtilsLabelEXT");
+        state->cmd_end_label = load_instance_proc<PFN_vkCmdEndDebugUtilsLabelEXT>(state->instance, "vkCmdEndDebugUtilsLabelEXT");
+        if (!state->cmd_begin_label || !state->cmd_end_label)
+        {
+            state->cmd_begin_label = nullptr;
+            state->cmd_end_label = nullptr;
+        }
+    }
 
     state->fn.write_sampler_descriptors = load_device_proc<PFN_vkWriteSamplerDescriptorsEXT>(state->device, "vkWriteSamplerDescriptorsEXT");
     state->fn.write_resource_descriptors = load_device_proc<PFN_vkWriteResourceDescriptorsEXT>(state->device, "vkWriteResourceDescriptorsEXT");
@@ -3397,6 +3455,38 @@ void read_timestamps(CommandPool* pool) noexcept
             *commands->timestamp_destinations[index] = commands->timestamp_results[index];
         commands->timestamp_count = 0;
     }
+}
+
+bool get_calibrated_timestamps(Device* device, CalibratedTimestamps& out) noexcept
+{
+    out = {};
+    if (!device->get_calibrated_timestamps) return false;
+    const VkCalibratedTimestampInfoKHR infos[2]{
+        {.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .timeDomain = VK_TIME_DOMAIN_DEVICE_KHR},
+        {.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .timeDomain = device->host_time_domain},
+    };
+    uint64 values[2]{};
+    uint64 deviation = 0;
+    if (device->get_calibrated_timestamps(device->device, 2, infos, values, &deviation) != VK_SUCCESS) return false;
+    out.gpu = values[0];
+    out.host = values[1];
+    out.max_deviation_ns = deviation;
+    out.host_domain = device->host_time_domain == VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR ? HostTimeDomain::query_performance_counter
+                                                                                                : HostTimeDomain::clock_monotonic;
+    return true;
+}
+
+void begin_debug_label(CommandBuffer* commands, const char* name) noexcept
+{
+    if (!commands->state->cmd_begin_label) return;
+    const VkDebugUtilsLabelEXT label{.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, .pLabelName = name};
+    commands->state->cmd_begin_label(commands->command_buffer, &label);
+}
+
+void end_debug_label(CommandBuffer* commands) noexcept
+{
+    if (!commands->state->cmd_end_label) return;
+    commands->state->cmd_end_label(commands->command_buffer);
 }
 
 CommandBuffer* begin_commands(CommandPool* pool) noexcept

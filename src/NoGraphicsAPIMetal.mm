@@ -657,6 +657,9 @@ void destroy_device(Device* device) noexcept
 }
 
 const DeviceCaps& get_device_caps(const Device* device) noexcept { return device->caps; }
+bool get_calibrated_timestamps(Device*, CalibratedTimestamps& out) noexcept { out = {}; return false; }
+void begin_debug_label(CommandBuffer*, const char*) noexcept {}
+void end_debug_label(CommandBuffer*) noexcept {}
 
 bool supports_texture_format(const Device* device, Format format, TextureUsage usage) noexcept
 {

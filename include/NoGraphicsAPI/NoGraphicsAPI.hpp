@@ -817,6 +817,32 @@ void write_timestamp(CommandBuffer* commands, uint64* cpu_destination, Stage sta
 // Call before resetting the pool; reset discards unread results. Unsubmitted buffers are ignored.
 void read_timestamps(CommandPool* pool) noexcept;
 
+// The host clock of CalibratedTimestamps::host: QueryPerformanceCounter counts (Windows) or CLOCK_MONOTONIC nanoseconds
+enum class HostTimeDomain : uint8
+{
+    none,
+    query_performance_counter,
+    clock_monotonic,
+};
+
+// A GPU timestamp (the ticks write_timestamp gives) and the host clock, sampled together (VK_KHR_calibrated_timestamps)
+struct CalibratedTimestamps
+{
+    uint64 gpu = 0;
+    uint64 host = 0;
+    uint64 max_deviation_ns = 0; // the sampling interval of the two values, as the driver reports it
+    HostTimeDomain host_domain = HostTimeDomain::none;
+};
+
+// False, leaving out empty, when the device has no calibrated timestamps (Vulkan without the extension, Metal for now).
+// Tools align GPU timestamps to the CPU timeline with it: host time = host + (ticks - gpu) * timestamp_period_ns.
+[[nodiscard]] bool get_calibrated_timestamps(Device* device, CalibratedTimestamps& out) noexcept;
+
+// A named region of commands for GPU tools (VK_EXT_debug_utils labels: Nsight, RenderDoc). No effect without the extension.
+// Pairs nest and must close in the same command buffer.
+void begin_debug_label(CommandBuffer* commands, const char* name) noexcept;
+void end_debug_label(CommandBuffer* commands) noexcept;
+
 // Every render pass starts with no graphics PSO. Bind one inside the pass before drawing, including every resumed segment.
 // Render-pass boundaries invalidate the current PSO selection; rebind a compute PSO before dispatching after a render pass.
 // Each segment needs matching attachments, load/store operations, and clear values, and its own begin/end_render_pass pair.
