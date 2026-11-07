@@ -1382,10 +1382,12 @@ struct Texture
     uint32 sample_count = 1;
     TextureType type = TextureType::two_d;
     Format format = Format::rgba8_unorm;
+    bool mutable_format = false;
+    bool external = false; // create_external_texture: the image belongs to someone else
 
     ~Texture()
     {
-        vkDestroyImage(state->device, image, nullptr);
+        if (!external) vkDestroyImage(state->device, image, nullptr);
     }
 };
 
@@ -1889,7 +1891,13 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         .enabledExtensionCount = enabled_instance_extension_count,
         .ppEnabledExtensionNames = enabled_instance_extension_count ? enabled_instance_extensions : nullptr,
     };
-    error = error_from_vk(vkCreateInstance(&instance_info, nullptr, &state->instance), "vkCreateInstance");
+    const VulkanCreateHooks* hooks = desc.vulkan_create_hooks;
+    assert((!hooks || (hooks->create_instance && hooks->create_device)) && "VulkanCreateHooks needs create_instance and create_device");
+    if (hooks)
+        error = error_from_vk(static_cast<VkResult>(hooks->create_instance(hooks->user, &instance_info, &state->instance)),
+                              "VulkanCreateHooks::create_instance");
+    else
+        error = error_from_vk(vkCreateInstance(&instance_info, nullptr, &state->instance), "vkCreateInstance");
     if (error != Error::none)
         return fail_device_creation(state, error);
 
@@ -1937,9 +1945,14 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     Candidate selected{};
     bool has_selected = false;
     char candidate_diagnostics[2048] = "No compatible GPU found.";
+    // A host that requires a GPU (OpenXR: the one driving the headset): that one alone
+    const VkPhysicalDevice required_device = hooks && hooks->select_physical_device
+        ? static_cast<VkPhysicalDevice>(hooks->select_physical_device(hooks->user, state->instance)) : VK_NULL_HANDLE;
     for (uint32 index = 0; index < physical_device_count; ++index)
     {
         const VkPhysicalDevice physical_device = physical_devices[index];
+        if (required_device && physical_device != required_device)
+            continue;
         Candidate candidate{};
         error = inspect_candidate(physical_device, state->surface, khr_surface_maintenance1, ext_surface_maintenance1, desc, candidate);
         if (error == Error::unsupported)
@@ -2085,7 +2098,11 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         .enabledExtensionCount = enabled_device_extension_count,
         .ppEnabledExtensionNames = enabled_device_extensions,
     };
-    error = error_from_vk(vkCreateDevice(state->physical_device, &device_info, nullptr, &state->device), "vkCreateDevice");
+    if (hooks)
+        error = error_from_vk(static_cast<VkResult>(hooks->create_device(hooks->user, state->physical_device, &device_info, &state->device)),
+                              "VulkanCreateHooks::create_device");
+    else
+        error = error_from_vk(vkCreateDevice(state->physical_device, &device_info, nullptr, &state->device), "vkCreateDevice");
     delete[] queue_priorities;
     if (error != Error::none)
         return fail_device_creation(state, error);
@@ -2788,7 +2805,9 @@ void prepare_texture(Device& device, const TextureDesc& desc, PreparedTexture& o
         const VkFormatFeatureFlags2 view_features = device.format_features[value];
         const bool sampled = has_flag(desc.usage, TextureUsage::sampled) && (view_features & sampled_features) == sampled_features;
         const bool storage = has_flag(desc.usage, TextureUsage::storage) && (view_features & storage_features) == storage_features;
-        if (!sampled && !storage)
+        const bool color = has_flag(desc.usage, TextureUsage::color_attachment) &&
+                           (view_features & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT) != 0;
+        if (!sampled && !storage && !color)
             continue;
         assert(view_format_count < format_count);
         output.view_formats[view_format_count++] = to_vk(view_format);
@@ -2886,6 +2905,7 @@ Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHe
         .sample_count = desc.sample_count,
         .type = desc.type,
         .format = desc.format,
+        .mutable_format = desc.mutable_format,
     };
     if (error_from_vk(vkCreateImage(device->device, &texture.image_info, nullptr, &result->image), "vkCreateImage") != Error::none)
     {
@@ -2904,6 +2924,71 @@ Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHe
 void destroy_texture(Texture* texture) noexcept
 {
     delete texture;
+}
+
+Texture* create_external_texture(Device* device, const TextureDesc& desc, void* native_image) noexcept
+{
+    assert(device && native_image && "create_external_texture needs a device and an image");
+    return new Texture{
+        .state = device,
+        .image = static_cast<VkImage>(native_image),
+        .width = desc.extent.x,
+        .height = desc.extent.y,
+        .depth = desc.extent.z,
+        .layer_count = desc.layer_count,
+        .sample_count = desc.sample_count,
+        .type = desc.type,
+        .format = desc.format,
+        .mutable_format = desc.mutable_format,
+        .external = true,
+    };
+}
+
+void begin_external_access(CommandBuffer* commands, Texture* texture) noexcept
+{
+    assert(commands && texture && commands->state == texture->state && texture->external);
+    const VkImageMemoryBarrier2 image_barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        // After every earlier command of the queue (the previous user's reads); the contents are discarded
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = texture->image,
+        .subresourceRange = {
+            .aspectMask = image_aspects(texture->format),
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        },
+    };
+    record_image_barriers(commands->command_buffer, {&image_barrier, 1});
+}
+
+void end_external_access(CommandBuffer* commands, Texture* texture) noexcept
+{
+    assert(commands && texture && commands->state == texture->state && texture->external);
+    const bool depth = has_depth_aspect(texture->format) || has_stencil_aspect(texture->format);
+    const VkImageMemoryBarrier2 image_barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = texture->image,
+        .subresourceRange = {
+            .aspectMask = image_aspects(texture->format),
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        },
+    };
+    record_image_barriers(commands->command_buffer, {&image_barrier, 1});
 }
 
 void initialize_texture(CommandBuffer* commands, Texture* texture) noexcept
@@ -2937,16 +3022,26 @@ RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc) noe
     uint32 height = texture->height >> desc.mip_level;
     if (width == 0) width = 1;
     if (height == 0) height = 1;
+    const Format view_format = desc.format == Format::undefined ? texture->format : desc.format;
+    assert((view_format == texture->format || (texture->mutable_format && compatible_view_formats(texture->format, view_format))) &&
+           "a render view of another format needs a mutable_format texture and a compatible format");
     RenderView* result = new RenderView{
         .state = texture->state,
         .width = width,
         .height = height,
     };
+    // The view is an attachment alone: an image that also has usages its view format lacks (storage on an sRGB image) still gets one
+    const VkImageViewUsageCreateInfo view_usage{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+        .usage = static_cast<VkImageUsageFlags>(has_depth_aspect(texture->format) || has_stencil_aspect(texture->format)
+            ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT),
+    };
     const VkImageViewCreateInfo view_info{
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = &view_usage,
         .image = texture->image,
         .viewType = desc.layer_count > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
-        .format = to_vk(texture->format),
+        .format = to_vk(view_format),
         .subresourceRange = {
             .aspectMask = image_aspects(texture->format),
             .baseMipLevel = desc.mip_level,
@@ -3781,6 +3876,22 @@ const DeviceCaps& get_device_caps(const Device* device) noexcept
 {
     assert(device && "get_device_caps called with a null device");
     return device->caps;
+}
+
+VulkanHandles get_vulkan_handles(const Device* device, uint32 queue_index) noexcept
+{
+    assert(device && queue_index < device->queue_count);
+    // Queues are made family by family, in order: the index within the family counts the earlier queues of the same family
+    uint32 index_in_family = 0;
+    for (uint32 index = 0; index < queue_index; ++index)
+        index_in_family += device->queues[index].family_index == device->queues[queue_index].family_index ? 1u : 0u;
+    return {
+        .instance = device->instance,
+        .physical_device = device->physical_device,
+        .device = device->device,
+        .queue_family_index = device->queues[queue_index].family_index,
+        .queue_index = index_in_family,
+    };
 }
 
 bool supports_texture_format(const Device* device, Format format, TextureUsage usage) noexcept

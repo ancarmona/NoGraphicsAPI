@@ -158,6 +158,16 @@ add_test(NAME test_texture_copy COMMAND test_texture_copy)
 set_tests_properties(test_texture_copy PROPERTIES
     SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
 
+if(NOT APPLE)
+    # OpenXR interop: VulkanCreateHooks, external textures, render views of another format, the release layout
+    add_executable(test_external_texture external_texture_test.cpp)
+    NoGraphicsAPI_disable_exceptions(test_external_texture)
+    target_link_libraries(test_external_texture PRIVATE NoGraphicsAPI::NoGraphicsAPI Vulkan::Vulkan)
+    add_test(NAME test_external_texture COMMAND test_external_texture)
+    set_tests_properties(test_external_texture PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
+endif()
+
 add_executable(test_texture_alias texture_alias_test.cpp)
 NoGraphicsAPI_disable_exceptions(test_texture_alias)
 target_link_libraries(test_texture_alias PRIVATE NoGraphicsAPI::NoGraphicsAPI)

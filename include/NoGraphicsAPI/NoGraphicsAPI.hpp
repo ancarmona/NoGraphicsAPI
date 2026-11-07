@@ -461,6 +461,20 @@ struct DeviceCaps
 
 enum class ColorSpace : uint32 { srgb, extended_srgb_linear };
 
+// Vulkan only: a host that must make the Vulkan instance and device itself, such as OpenXR's XR_KHR_vulkan_enable2
+// (xrCreateVulkanInstanceKHR, xrGetVulkanGraphicsDevice2KHR, xrCreateVulkanDeviceKHR). create_device fills its create infos as
+// usual (layers, extensions, features, queues) and passes them to these callbacks instead of calling vkCreateInstance and
+// vkCreateDevice; the host may add what it needs. Pointers are Vulkan types: VkInstanceCreateInfo*, VkInstance*, VkPhysicalDevice,
+// VkDeviceCreateInfo*, VkDevice*; results are VkResult. The device owns what the callbacks make (destroy_device destroys them).
+struct VulkanCreateHooks
+{
+    void* user = nullptr;
+    int32 (*create_instance)(void* user, const void* instance_create_info, void* instance_out) = nullptr;
+    // The GPU the host requires, or null to let create_device choose. It must still have every capability create_device needs.
+    void* (*select_physical_device)(void* user, void* instance) = nullptr;
+    int32 (*create_device)(void* user, void* physical_device, const void* device_create_info, void* device_out) = nullptr;
+};
+
 // Win32 windowed device lifecycle, swapchain format/extent changes, acquire, and presentation stay on the window's message-pump thread.
 // Metal calls may use a render thread; synchronize CAMetalLayer access with native UI/layer changes.
 // The window/layer must outlive the device. Other calls follow the object-level threading contract below.
@@ -476,6 +490,17 @@ struct DeviceDesc
     uint32 desired_compute_queue_count = 0;
     uint32 desired_copy_queue_count = 0;
     uint32 timestamp_query_count = 256; // Per command buffer; zero disables timestamps.
+    const VulkanCreateHooks* vulkan_create_hooks = nullptr; // Vulkan only; null creates the instance and device directly.
+};
+
+// The native objects of a Vulkan device, for interop (OpenXR's XrGraphicsBindingVulkan2KHR). Null on Metal.
+struct VulkanHandles
+{
+    void* instance = nullptr;        // VkInstance
+    void* physical_device = nullptr; // VkPhysicalDevice
+    void* device = nullptr;          // VkDevice
+    uint32 queue_family_index = 0;
+    uint32 queue_index = 0;          // Within its family.
 };
 
 struct DeviceInit
@@ -509,6 +534,9 @@ struct RenderViewDesc
     uint32 mip_level = 0;
     uint32 slice = 0; // Physical array slice; cube faces are individual slices.
     uint32 layer_count = 1; // Consecutive slices from slice. More than one creates an array view for multiview rendering.
+    // Undefined inherits the texture format. Another format needs a mutable_format texture and a compatible format, such as
+    // rgba8_unorm on an rgba8_srgb texture: writes then store the shader's values without sRGB encoding.
+    Format format = Format::undefined;
 };
 
 struct TextureDescriptorDesc
@@ -716,6 +744,8 @@ constexpr RenderingFlags operator|(RenderingFlags lhs, RenderingFlags rhs) noexc
 [[nodiscard]] DeviceInit create_device(const DeviceDesc& desc = {}) noexcept;
 void destroy_device(Device* device) noexcept;
 [[nodiscard]] const DeviceCaps& get_device_caps(const Device* device) noexcept;
+// Vulkan: the device's native objects and the queue_index queue's family and index; empty on Metal.
+[[nodiscard]] VulkanHandles get_vulkan_handles(const Device* device, uint32 queue_index = 0) noexcept;
 [[nodiscard]] bool supports_texture_format(const Device* device, Format format, TextureUsage usage) noexcept;
 [[nodiscard]] uint32x2 get_drawable_extent(Device* device) noexcept;
 // Call after wait_idle, outside an acquired frame. Unsupported pairs leave the current mode unchanged.
@@ -759,6 +789,11 @@ void destroy_texture_heap(const TextureHeap& heap) noexcept;
 // Creates an uninitialized texture without recording GPU commands. Views and descriptors can be created before initialize_texture().
 [[nodiscard]] Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHeap& heap, uint64 offset) noexcept;
 void destroy_texture(Texture* texture) noexcept;
+// Vulkan only: wraps an image made by someone else (a VkImage, such as an OpenXR swapchain image) without taking it: destroy_texture
+// leaves the image. desc describes the image as it was made (type, extent, layers, format, samples, mutable_format, usage). The
+// library keeps every texture in one layout; begin_external_access moves the image into it before its first use in a command
+// buffer, and end_external_access hands it back in the layout an OpenXR runtime expects.
+[[nodiscard]] Texture* create_external_texture(Device* device, const TextureDesc& desc, void* native_image) noexcept;
 [[nodiscard]] RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc = {}) noexcept;
 void destroy_render_view(RenderView* render_view) noexcept;
 // Descriptor slots form application-owned namespaces. Writes and copies require indices within capacity;
@@ -800,6 +835,13 @@ void set_sampler_descriptor_heap(CommandBuffer* commands, SamplerDescriptorHeap*
 // Synchronize prior storage accesses and make their writes available with barriers or timeline waits first; these do not initialize metadata.
 // Discards contents; clear or overwrite before reading. Orders initialization before subsequent texture accesses on this queue.
 void initialize_texture(CommandBuffer* commands, Texture* texture) noexcept;
+// An external texture (create_external_texture) at the start of its use in a command buffer: it discards the contents (the image
+// may be in any layout, such as an OpenXR swapchain image after xrWaitSwapchainImage) and orders the transition after every
+// earlier command of the queue.
+void begin_external_access(CommandBuffer* commands, Texture* texture) noexcept;
+// Its end: after every earlier command of the queue, the image goes to the color attachment layout (the depth-stencil attachment
+// layout for a depth format), the layout OpenXR requires at xrReleaseSwapchainImage. Record nothing on the texture after it.
+void end_external_access(CommandBuffer* commands, Texture* texture) noexcept;
 
 // Command GPU ranges must lie within one GPU heap.
 void copy_memory(CommandBuffer* commands, GpuRange source, GpuRange destination) noexcept;
