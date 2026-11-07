@@ -125,6 +125,12 @@ MTLTextureDescriptor* texture_descriptor(const TextureDesc& desc)
     result.mipmapLevelCount = desc.mip_levels;
     result.arrayLength = desc.type == TextureType::cube_array ? desc.layer_count / 6 :
                          desc.type == TextureType::two_d_array ? desc.layer_count : 1;
+    if (desc.sample_count > 1)
+    {
+        // Multisample textures are 2D or 2D arrays with one mip level (TextureDesc::sample_count)
+        result.textureType = desc.type == TextureType::two_d_array ? MTLTextureType2DMultisampleArray : MTLTextureType2DMultisample;
+        result.sampleCount = desc.sample_count;
+    }
     result.storageMode = MTLStorageModePrivate;
     result.hazardTrackingMode = MTLHazardTrackingModeUntracked;
     result.usage = MTLTextureUsageUnknown;
@@ -181,6 +187,7 @@ struct RenderView
     id<MTLTexture> texture = nil;
     uint32 mip = 0;
     uint32 slice = 0;
+    uint32 layer_count = 1;
 };
 
 struct TextureDescriptorHeap
@@ -594,6 +601,16 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
             .storage_input_output16 = true,
             .indirect_mesh_draw = [device->metal supportsFamily:MTLGPUFamilyApple9],
         };
+        // Apple GPUs render and sample MSAA in float, normalized and integer formats alike. Metal's default 4x positions are
+        // Vulkan's standard ones (checked on an M5 Max: (0.375, 0.125), (0.875, 0.375), (0.125, 0.625), (0.625, 0.875))
+        for (uint32 count = 1; count <= 8; count *= 2)
+            if ([device->metal supportsTextureSampleCount:count]) device->caps.sample_counts |= count;
+        device->caps.integer_sample_counts = device->caps.sample_counts;
+        // Multiview by vertex amplification: view i is amplification_id i (SV_ViewID), drawn into layer i through the view mapping's
+        // render target array offset (begin_render_pass). Render and mesh pipelines alike
+        for (uint32 count = 1; count <= 8; ++count)
+            if ([device->metal supportsVertexAmplificationCount:count]) device->caps.max_multiview_view_count = count;
+        device->caps.max_mesh_multiview_view_count = device->caps.max_multiview_view_count;
         if (desc.window)
         {
             device->layer = [(CAMetalLayer*)desc.window retain];
@@ -834,6 +851,17 @@ void destroy_texture_heap(const TextureHeap& heap) noexcept
     }
 }
 
+namespace
+{
+bool valid_sample_count(Device* device, const TextureDesc& desc)
+{
+    if (desc.sample_count == 1) return true;
+    return (desc.sample_count & (desc.sample_count - 1)) == 0 && (device->caps.sample_counts & desc.sample_count) != 0 &&
+           (desc.type == TextureType::two_d || desc.type == TextureType::two_d_array) && desc.mip_levels == 1 &&
+           !has_usage(desc.usage, TextureUsage::storage);
+}
+}
+
 SizeAlign get_texture_size_align(Device* device, const TextureDesc& desc) noexcept
 {
     @autoreleasepool
@@ -843,9 +871,9 @@ SizeAlign get_texture_size_align(Device* device, const TextureDesc& desc) noexce
             report_error("unsupported texture format or usage", nil);
             return {};
         }
-        if (desc.sample_count != 1)
+        if (!valid_sample_count(device, desc))
         {
-            report_error("multisample textures are unsupported", nil);
+            report_error("unsupported multisample texture", nil);
             return {};
         }
         MTLTextureDescriptor* descriptor = texture_descriptor(desc);
@@ -862,7 +890,7 @@ Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHe
     @autoreleasepool
     {
         assert(device && heap.owner && heap.owner->device == device);
-        if (desc.sample_count != 1) { report_error("multisample textures are unsupported", nil); return nullptr; }
+        if (!valid_sample_count(device, desc)) { report_error("unsupported multisample texture", nil); return nullptr; }
         MTLTextureDescriptor* descriptor = texture_descriptor(desc);
         id<MTLTexture> texture = [heap.owner->heap newTextureWithDescriptor:descriptor offset:offset];
         [descriptor release];
@@ -894,8 +922,12 @@ RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc) noe
 {
     @autoreleasepool
     {
-        if (desc.layer_count != 1) { report_error("multiview render views are unsupported", nil); return nullptr; }
-        return new RenderView{.texture = [texture->texture retain], .mip = desc.mip_level, .slice = desc.slice};
+        if (desc.layer_count != 1 && desc.slice != 0)
+        {
+            report_error("multiview render views start at slice 0", nil);
+            return nullptr;
+        }
+        return new RenderView{.texture = [texture->texture retain], .mip = desc.mip_level, .slice = desc.slice, .layer_count = desc.layer_count};
     }
 }
 
@@ -1087,6 +1119,12 @@ MTLBlendFactor blend_factor(BlendFactor factor)
     return factors[static_cast<uint32>(factor)];
 }
 
+// Views 0 to n - 1: amplification_id i is SV_ViewID i
+bool valid_view_mask(Device* device, uint32 mask)
+{
+    return mask == 0 || ((mask & (mask + 1)) == 0 && uint32(__builtin_popcount(mask)) <= device->caps.max_multiview_view_count);
+}
+
 void color_targets(MTL4RenderPipelineColorAttachmentDescriptorArray* attachments, Span<const ColorTargetDesc> targets)
 {
     for (uint32 i = 0; i < targets.size; ++i)
@@ -1109,9 +1147,9 @@ void color_targets(MTL4RenderPipelineColorAttachmentDescriptorArray* attachments
 PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept
 {
     assert(desc.vertex.code.size && "Graphics PSOs require a vertex stage");
-    if (desc.sample_count != 1 || desc.alpha_to_coverage || desc.view_mask)
+    if (!valid_view_mask(device, desc.view_mask))
     {
-        report_error("multisample and multiview pipelines are unsupported", nil);
+        report_error("unsupported multiview view mask", nil);
         return nullptr;
     }
     @autoreleasepool
@@ -1126,6 +1164,9 @@ PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept
         pipeline.vertexFunctionDescriptor = vertex;
         pipeline.fragmentFunctionDescriptor = fragment;
         pipeline.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        pipeline.maxVertexAmplificationCount = desc.view_mask ? __builtin_popcount(desc.view_mask) : 1;
+        pipeline.rasterSampleCount = desc.sample_count;
+        pipeline.alphaToCoverageState = desc.alpha_to_coverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
         color_targets(pipeline.colorAttachments, desc.color_targets);
         NSError* error = nil;
         id<MTLRenderPipelineState> state = [device->compiler newRenderPipelineStateWithDescriptor:pipeline compilerTaskOptions:nil error:&error];
@@ -1141,9 +1182,9 @@ PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept
 PSO* create_mesh_pso(Device* device, const MeshPSODesc& desc) noexcept
 {
     assert(desc.mesh.code.size && "Mesh PSOs require a mesh stage");
-    if (desc.sample_count != 1 || desc.alpha_to_coverage || desc.view_mask)
+    if (!valid_view_mask(device, desc.view_mask))
     {
-        report_error("multisample and multiview pipelines are unsupported", nil);
+        report_error("unsupported multiview view mask", nil);
         return nullptr;
     }
     @autoreleasepool
@@ -1161,6 +1202,9 @@ PSO* create_mesh_pso(Device* device, const MeshPSODesc& desc) noexcept
         pipeline.fragmentFunctionDescriptor = fragment;
         pipeline.requiredThreadsPerMeshThreadgroup = metal_size(desc.mesh.threadgroup_size);
         if (task) pipeline.requiredThreadsPerObjectThreadgroup = metal_size(desc.task.threadgroup_size);
+        pipeline.maxVertexAmplificationCount = desc.view_mask ? __builtin_popcount(desc.view_mask) : 1;
+        pipeline.rasterSampleCount = desc.sample_count;
+        pipeline.alphaToCoverageState = desc.alpha_to_coverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
         color_targets(pipeline.colorAttachments, desc.color_targets);
         NSError* error = nil;
         id<MTLRenderPipelineState> state = [device->compiler newRenderPipelineStateWithDescriptor:pipeline compilerTaskOptions:nil error:&error];
@@ -1644,7 +1688,8 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
 {
     @autoreleasepool
     {
-        assert(commands->recording && !commands->render && commands->pool->kind == QueueKind::general && desc.colors.size <= 8 && desc.view_mask == 0);
+        assert(commands->recording && !commands->render && commands->pool->kind == QueueKind::general && desc.colors.size <= 8);
+        assert(valid_view_mask(commands->device, desc.view_mask));
         end_compute(commands);
         MTL4RenderPassDescriptor* pass = commands->pass;
         RenderView* area = desc.colors.size ? desc.colors.data[0].render_view :
@@ -1669,6 +1714,9 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
         const NSUInteger height = area->texture.height >> area->mip;
         pass.renderTargetWidth = width ? width : 1;
         pass.renderTargetHeight = height ? height : 1;
+        const uint32 views = desc.view_mask ? __builtin_popcount(desc.view_mask) : 0;
+        assert(views <= area->layer_count);
+        pass.renderTargetArrayLength = views;
         commands->render_continuation = flags != RenderingFlags::none;
         MTL4RenderEncoderOptions options = (static_cast<uint32>(flags) & static_cast<uint32>(RenderingFlags::suspending)) != 0 ?
                                           MTL4RenderEncoderOptionSuspending : MTL4RenderEncoderOptionNone;
@@ -1679,6 +1727,13 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
         [commands->render setViewport:MTLViewport{0, double(height ? height : 1), double(width ? width : 1), -double(height ? height : 1), 0, 1}];
         [commands->render setScissorRect:MTLScissorRect{0, 0, width ? width : 1, height ? height : 1}];
         [commands->render setDepthStencilState:depth_state(commands->pool, {})];
+        if (views)
+        {
+            // View i into layer i: the shaders do not write render_target_array_index, the mapping's offset is the layer
+            MTLVertexAmplificationViewMapping mappings[8] = {};
+            for (uint32 view = 0; view < views; ++view) mappings[view] = {.viewportArrayIndexOffset = 0, .renderTargetArrayIndexOffset = view};
+            [commands->render setVertexAmplificationCount:views viewMappings:mappings];
+        }
         commands->pso = nullptr;
     }
 }
@@ -1689,6 +1744,12 @@ void end_render_pass(CommandBuffer* commands) noexcept
     {
         assert(commands->render);
         MTL4RenderPassDescriptor* pass = commands->pass;
+        // barrier() runs outside render passes, on a compute encoder: after a pass, that encoder is a new one with no raster work, so
+        // its producer barrier would order nothing. The render encoder itself orders its raster stages before every later pass,
+        // with its attachments' writes made visible (Metal 4 orders nothing between encoders implicitly)
+        if (!commands->render_continuation)
+            [commands->render barrierAfterStages:MTLStageVertex | MTLStageObject | MTLStageMesh | MTLStageFragment | MTLStageTile
+                               beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
         [commands->render endEncoding];
         [commands->render release];
         commands->render = nil;

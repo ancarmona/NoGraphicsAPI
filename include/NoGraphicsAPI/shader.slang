@@ -69,7 +69,7 @@ T gpu_sampler<T : IOpaqueDescriptor = SamplerState>(uint index)
 
 #endif
 
-// Multisample textures (Vulkan only). Load(int2 pixel, int sample_index) reads one sample; Load(int3(pixel, layer), sample_index) for arrays.
+// Multisample textures (Vulkan and Metal). Load(int2 pixel, int sample_index) reads one sample; Load(int3(pixel, layer), sample_index) for arrays.
 [ForceInline]
 Texture2DMS<T> gpu_texture_ms<T : ITexelElement>(uint index)
 {
@@ -80,6 +80,28 @@ Texture2DMS<T> gpu_texture_ms<T : ITexelElement>(uint index)
 Texture2DMSArray<T> gpu_texture_ms_array<T : ITexelElement>(uint index)
 {
     return gpu_texture<Texture2DMSArray<T>>(index);
+}
+
+// One sample of a multisample array: Load(int3(pixel, layer), sample). Slang 2026.20 emits int coordinates for Metal's
+// texture2d_ms_array::read, which takes only unsigned ones, so Metal reads through its own call
+[ForceInline]
+float gpu_load_ms_array(Texture2DMSArray<float> texture, int3 location, int sample_index)
+{
+    __target_switch
+    {
+    case metal: __intrinsic_asm "$0.read(uint2($1.xy), uint($1.z), uint($2)).x";
+    default: return texture.Load(location, sample_index);
+    }
+}
+
+[ForceInline]
+float4 gpu_load_ms_array(Texture2DMSArray<float4> texture, int3 location, int sample_index)
+{
+    __target_switch
+    {
+    case metal: __intrinsic_asm "$0.read(uint2($1.xy), uint($1.z), uint($2))";
+    default: return texture.Load(location, sample_index);
+    }
 }
 
 [ForceInline]
