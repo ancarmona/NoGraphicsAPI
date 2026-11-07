@@ -32,6 +32,7 @@ conventional feature checked by device creation.
 | [`VK_EXT_mesh_shader`][mesh-shader] | Required task and mesh shader support for direct and indirect workgroup draws. |
 | Buffer device address | Gives GPU heaps 64-bit shader addresses for their lifetime and enables typed pointer fields in shared structures. |
 | Vulkan 1.3 `synchronization2` and `dynamicRendering` | Resource-free barriers and rendering without render-pass or framebuffer objects. |
+| Vulkan 1.1 `multiview` | Required. Dynamic-rendering view masks render several array layers in one pass. `multiviewMeshShader` is enabled when available. |
 | Core Vulkan dynamic state | Command-set viewport, scissor, and exposed depth/stencil state. |
 | Timeline semaphores | Application-visible completion points and cross-queue waits; private swapchain retirement. |
 | 64-bit timestamps (optional) | Supported queues capture GPU markers; `read_timestamps(pool)` retrieves them into CPU memory after submission completion. |
@@ -247,6 +248,40 @@ use `VK_EXT_mesh_shader`, with task and mesh support enabled as part of the fixe
 task workgroups, which cull or expand work through their payload and mesh dispatch. Empty task code
 launches mesh workgroups directly. `Stage::task` names task-stage hazards in barriers. All graphics
 stages share the same root ABI and descriptor heaps.
+
+## Multisampling
+
+`TextureDesc::sample_count` selects 1, 2, 4 or 8 samples. `DeviceCaps::sample_counts` reports the counts usable for
+float/normalized color and depth/stencil attachments that are also sampleable; `integer_sample_counts` covers integer
+color, such as `r32_uint` or `rg32_uint` visibility IDs. `get_texture_size_align()` checks the format's own sample counts.
+Multisample textures are 2D or 2D arrays with one mip level and no storage usage, as Vulkan requires; they stay in
+`GENERAL` like every other texture. Raster PSOs set the same `sample_count` as their attachments.
+
+There is no hardware resolve, no resolve attachment and no `VK_EXT_multisampled_render_to_single_sampled`.
+Applications resolve in compute or fragment shaders: a sampled descriptor of a multisample texture binds as
+`Texture2DMS<T>` or `Texture2DMSArray<T>` (`gpu_texture_ms`, `gpu_texture_ms_array`), and `Load(pixel, sample)` reads one sample,
+including depth. Memory copies (`copy_memory_to_texture`, `copy_texture_to_memory`) require single-sample textures.
+With Vulkan standard sample locations, 4x places samples 0 and 2 in the left half of the pixel and samples 1 and 3 in the right half.
+
+`alpha_to_coverage` in the PSO derives coverage from the alpha of fragment output `SV_Target0`. Vulkan skips it when that
+output is an integer type, so put a float target first. The state is fixed at PSO creation;
+`VK_EXT_extended_dynamic_state3` is not used. Shaders can also read or write `SV_Coverage` (SPIR-V `SampleMask`) in the fragment stage.
+
+## Multiview
+
+`RenderingDesc::view_mask` maps to `VkRenderingInfo::viewMask`, and the PSO `view_mask` to
+`VkPipelineRenderingCreateInfo::viewMask`; the two must match. Bit `i` renders view `i` into layer `i` of each attachment.
+Create attachment views with `RenderViewDesc::layer_count` covering the highest view; more than one layer creates a 2D-array view.
+Multisample array textures work the same way. `DeviceCaps::max_multiview_view_count` limits the render-pass mask
+(`maxMultiviewViewCount`, at least 6), and `max_mesh_multiview_view_count` limits mesh PSOs
+(`maxMeshMultiviewViewCount` when `multiviewMeshShader` is supported, otherwise zero).
+
+Shaders read the view through `SV_ViewID`, which Slang emits as the SPIR-V `ViewIndex` built-in with the `MultiView`
+capability (and `Flat` in fragment shaders). Declare it as an entry-point parameter. Vertex, mesh and fragment stages can read it; task
+shaders cannot. In mesh shaders, keep topology, output counts and indices independent of the view and let only
+per-vertex values such as `SV_Position` depend on it; Vulkan then treats those outputs as per-view. Shaders must not write
+`SV_RenderTargetArrayIndex` while multiview is active. NVIDIA per-view attribute extensions
+(`VK_NVX_multiview_per_view_attributes`, `NV_mesh_shader` per-view outputs) are not used.
 
 ## Submission, presentation, and lifetime
 

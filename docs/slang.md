@@ -17,7 +17,9 @@ Texture2D<float4> texture = gpu_texture<Texture2D<float4>>(root.texture_index);
 SamplerState sampler = gpu_sampler(root.sampler_index);
 ```
 
-Use `gpu_sampler<SamplerComparisonState>(index)` for comparison samplers. Texture types must match
+Use `gpu_sampler<SamplerComparisonState>(index)` for comparison samplers. On Vulkan, `gpu_texture_ms<T>(index)` and
+`gpu_texture_ms_array<T>(index)` return `Texture2DMS<T>` and `Texture2DMSArray<T>` for sampled multisample textures; use
+`Load(pixel, sample_index)` to read one sample. Multiview shaders take `uint view : SV_ViewID` as an entry-point parameter. Texture types must match
 the indexed view. Helpers inline on both backends; `gpu_nonuniform_index(index)` preserves explicit
 nonuniform annotations. See [Metal implementation](metal-support.md) for texture-pool indexing.
 
