@@ -897,7 +897,8 @@ bool fits_image_format_properties(const VkImageCreateInfo& image_info, const VkI
            image_info.extent.height <= properties.maxExtent.height &&
            image_info.extent.depth <= properties.maxExtent.depth &&
            image_info.mipLevels <= properties.maxMipLevels &&
-           image_info.arrayLayers <= properties.maxArrayLayers;
+           image_info.arrayLayers <= properties.maxArrayLayers &&
+           (properties.sampleCounts & image_info.samples) != 0;
 }
 
 bool supports_image_create_info(Device& device, const VkImageCreateInfo& image_info, VkImageFormatProperties* output = nullptr) noexcept
@@ -978,6 +979,49 @@ bool select_texture_memory_type(Device& device) noexcept
     const VkMemoryRequirements color_requirements = image_memory_requirements(device, image_info);
     uint32 memory_type_bits = color_requirements.memoryTypeBits;
     include_texture_heap_alignment(device, color_requirements);
+
+    // Multisample probes at the highest supported count; their placements can need a larger alignment.
+    const VkPhysicalDeviceLimits& limits = device.physical_properties.limits;
+    const VkSampleCountFlags color_samples = limits.framebufferColorSampleCounts & limits.sampledImageColorSampleCounts & 15u;
+    const VkSampleCountFlags depth_samples = limits.framebufferDepthSampleCounts & limits.sampledImageDepthSampleCounts & 15u;
+    const VkImageCreateInfo multisample_probes[]{
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .extent = {.width = probe_2d_size, .height = probe_2d_size, .depth = 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = static_cast<VkSampleCountFlagBits>(1u << (31u - detail::count_leading_zeros(color_samples))),
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .sharingMode = image_info.sharingMode,
+            .queueFamilyIndexCount = image_info.queueFamilyIndexCount,
+            .pQueueFamilyIndices = image_info.pQueueFamilyIndices,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_D32_SFLOAT,
+            .extent = {.width = probe_2d_size, .height = probe_2d_size, .depth = 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = static_cast<VkSampleCountFlagBits>(1u << (31u - detail::count_leading_zeros(depth_samples))),
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+            .sharingMode = image_info.sharingMode,
+            .queueFamilyIndexCount = image_info.queueFamilyIndexCount,
+            .pQueueFamilyIndices = image_info.pQueueFamilyIndices,
+        },
+    };
+    for (const VkImageCreateInfo& probe : multisample_probes)
+    {
+        if (probe.samples == VK_SAMPLE_COUNT_1_BIT || !supports_image_create_info(device, probe))
+            continue;
+        const VkMemoryRequirements requirements = image_memory_requirements(device, probe);
+        memory_type_bits &= requirements.memoryTypeBits;
+        include_texture_heap_alignment(device, requirements);
+    }
 
     constexpr TextureUsage broad_texture_usage = TextureUsage::sampled | TextureUsage::storage | TextureUsage::transfer_destination;
     const VkFormatFeatureFlags2 broad_features = device.format_features[static_cast<uint32>(Format::rgba32_float)];
@@ -1329,6 +1373,7 @@ struct Texture
     uint32 height = 0;
     uint32 depth = 0;
     uint32 layer_count = 0;
+    uint32 sample_count = 1;
     TextureType type = TextureType::two_d;
     Format format = Format::rgba8_unorm;
 
@@ -1497,9 +1542,12 @@ struct Candidate
     bool texture_compression_astc = false;
     bool texture_compression_etc2 = false;
     bool storage_input_output16 = false;
+    bool multiview_mesh_shader = false;
     bool khr_swapchain_maintenance1 = false;
     VkPhysicalDeviceDescriptorHeapPropertiesEXT heap_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT};
+    VkPhysicalDeviceVulkan11Properties vulkan11_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
     VkPhysicalDeviceVulkan12Properties vulkan12_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+    VkPhysicalDeviceMeshShaderPropertiesEXT mesh_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
     const char* missing_extensions[5]{};
     uint32 missing_extension_count = 0;
 };
@@ -1554,7 +1602,9 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
     Candidate result{
         .physical_device = physical_device,
     };
-    result.heap_properties.pNext = &result.vulkan12_properties;
+    result.heap_properties.pNext = &result.vulkan11_properties;
+    result.vulkan11_properties.pNext = &result.vulkan12_properties;
+    result.vulkan12_properties.pNext = &result.mesh_properties;
     VkPhysicalDeviceProperties2 properties2{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
         .pNext = &result.heap_properties,
@@ -1562,7 +1612,9 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
     vkGetPhysicalDeviceProperties2(physical_device, &properties2);
     result.properties = properties2.properties;
     result.heap_properties.pNext = nullptr;
+    result.vulkan11_properties.pNext = nullptr;
     result.vulkan12_properties.pNext = nullptr;
+    result.mesh_properties.pNext = nullptr;
     if (result.properties.apiVersion < VK_API_VERSION_1_4)
         return Error::unsupported;
 
@@ -1596,6 +1648,7 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
         features.vulkan11.storageBuffer16BitAccess == VK_TRUE &&
         features.vulkan11.storagePushConstant16 == VK_TRUE &&
         features.vulkan11.shaderDrawParameters == VK_TRUE &&
+        features.vulkan11.multiview == VK_TRUE &&
         features.vulkan12.shaderFloat16 == VK_TRUE &&
         features.vulkan12.scalarBlockLayout == VK_TRUE &&
         features.vulkan12.bufferDeviceAddress == VK_TRUE &&
@@ -1621,6 +1674,7 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
     result.texture_compression_astc = features.core.features.textureCompressionASTC_LDR == VK_TRUE;
     result.texture_compression_etc2 = features.core.features.textureCompressionETC2 == VK_TRUE;
     result.storage_input_output16 = features.vulkan11.storageInputOutput16 == VK_TRUE;
+    result.multiview_mesh_shader = features.mesh_shader.multiviewMeshShader == VK_TRUE;
     result.khr_swapchain_maintenance1 = khr_swapchain_maintenance1;
 
     uint32 available_queue_count = 0;
@@ -1936,6 +1990,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     enabled_features.vulkan11.storagePushConstant16 = VK_TRUE;
     enabled_features.vulkan11.storageInputOutput16 = selected.storage_input_output16;
     enabled_features.vulkan11.shaderDrawParameters = VK_TRUE;
+    enabled_features.vulkan11.multiview = VK_TRUE;
     enabled_features.vulkan12.shaderFloat16 = VK_TRUE;
     enabled_features.vulkan12.scalarBlockLayout = VK_TRUE;
     enabled_features.vulkan12.timelineSemaphore = VK_TRUE;
@@ -1951,6 +2006,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     enabled_features.unified_image_layouts.unifiedImageLayouts = selected.unified_image_layouts ? VK_TRUE : VK_FALSE;
     enabled_features.mesh_shader.taskShader = VK_TRUE;
     enabled_features.mesh_shader.meshShader = VK_TRUE;
+    enabled_features.mesh_shader.multiviewMeshShader = selected.multiview_mesh_shader;
     enabled_features.swapchain_maintenance1.swapchainMaintenance1 = VK_TRUE;
 
     const uint32 requested_counts[]{desc.desired_queue_count, desc.desired_compute_queue_count, desc.desired_copy_queue_count};
@@ -2081,6 +2137,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         }
     }
 
+    const VkPhysicalDeviceLimits& limits = selected.properties.limits;
     state->caps = {
         .device_name = state->physical_properties.deviceName,
         .queue_count = state->queue_count,
@@ -2096,6 +2153,11 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         .texture_compression_astc = selected.texture_compression_astc,
         .storage_input_output16 = selected.storage_input_output16,
         .indirect_mesh_draw = true,
+        .sample_counts = limits.framebufferColorSampleCounts & limits.framebufferDepthSampleCounts & limits.framebufferStencilSampleCounts &
+                         limits.sampledImageColorSampleCounts & limits.sampledImageDepthSampleCounts & limits.sampledImageStencilSampleCounts & 15u,
+        .integer_sample_counts = selected.vulkan12_properties.framebufferIntegerColorSampleCounts & limits.sampledImageIntegerSampleCounts & 15u,
+        .max_multiview_view_count = selected.vulkan11_properties.maxMultiviewViewCount,
+        .max_mesh_multiview_view_count = selected.multiview_mesh_shader ? selected.mesh_properties.maxMeshMultiviewViewCount : 0u,
     };
     if (presentation)
     {
@@ -2649,6 +2711,11 @@ void prepare_texture(Device& device, const TextureDesc& desc, PreparedTexture& o
     if (has_flag(desc.usage, TextureUsage::transfer_source)) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (has_flag(desc.usage, TextureUsage::transfer_destination)) usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
+    assert((desc.sample_count == 1 || desc.sample_count == 2 || desc.sample_count == 4 || desc.sample_count == 8) &&
+           "texture sample_count must be 1, 2, 4 or 8");
+    assert((desc.sample_count == 1 || ((desc.type == TextureType::two_d || desc.type == TextureType::two_d_array) && desc.mip_levels == 1 &&
+                                       !has_flag(desc.usage, TextureUsage::storage))) &&
+           "multisample textures must be 2D or 2D arrays with one mip level and no storage usage");
     const VkImageType image_type = to_vk(desc.type);
     const VkFormat format = to_vk(desc.format);
     const VkFormatFeatureFlags2 sampled_features = required_format_features(TextureUsage::sampled);
@@ -2688,7 +2755,7 @@ void prepare_texture(Device& device, const TextureDesc& desc, PreparedTexture& o
         },
         .mipLevels = desc.mip_levels,
         .arrayLayers = desc.layer_count,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .samples = static_cast<VkSampleCountFlagBits>(desc.sample_count),
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = usage,
         .sharingMode = device.queue_family_count > 1 ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE,
@@ -2758,6 +2825,7 @@ Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHe
         .height = desc.extent.y,
         .depth = desc.extent.z,
         .layer_count = desc.layer_count,
+        .sample_count = desc.sample_count,
         .type = desc.type,
         .format = desc.format,
     };
@@ -2805,7 +2873,7 @@ void initialize_texture(CommandBuffer* commands, Texture* texture) noexcept
 
 RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc) noexcept
 {
-    assert(texture && texture->state);
+    assert(texture && texture->state && desc.layer_count != 0 && desc.slice + desc.layer_count <= texture->layer_count);
 
     uint32 width = texture->width >> desc.mip_level;
     uint32 height = texture->height >> desc.mip_level;
@@ -2819,14 +2887,14 @@ RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc) noe
     const VkImageViewCreateInfo view_info{
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = texture->image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .viewType = desc.layer_count > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
         .format = to_vk(texture->format),
         .subresourceRange = {
             .aspectMask = image_aspects(texture->format),
             .baseMipLevel = desc.mip_level,
             .levelCount = 1,
             .baseArrayLayer = desc.slice,
-            .layerCount = 1,
+            .layerCount = desc.layer_count,
         },
     };
     if (error_from_vk(vkCreateImageView(texture->state->device, &view_info, nullptr, &result->view), "vkCreateImageView") != Error::none)
@@ -3025,16 +3093,28 @@ constexpr VkDescriptorSetAndBindingMappingEXT root_mapping{
     .sourceData = {.pushAddressOffset = 0},
 };
 
-PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const ShaderStage& fragment, Span<const ColorTargetDesc> color_targets,
-                       Format depth_format, Format stencil_format, const RasterizationState& rasterization_state,
-                       bool mesh, const ShaderStage& task = {}) noexcept
+struct RasterTargets
 {
+    Span<const ColorTargetDesc> color_targets = {};
+    Format depth_format = Format::undefined;
+    Format stencil_format = Format::undefined;
+    uint32 sample_count = 1;
+    bool alpha_to_coverage = false;
+    uint32 view_mask = 0;
+};
+
+PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const ShaderStage& fragment, const RasterTargets& targets,
+                       const RasterizationState& rasterization_state, bool mesh, const ShaderStage& task = {}) noexcept
+{
+    const Span<const ColorTargetDesc> color_targets = targets.color_targets;
     assert(device && "PSO creation called with a null device");
     assert_spirv(first_stage.code);
     if (task.code.size) assert_spirv(task.code);
     if (fragment.code.size) assert_spirv(fragment.code);
     assert((color_targets.size == 0 || color_targets.data) && color_targets.size <= max_color_attachments &&
            "color targets must fit the wrapper's attachment array");
+    assert((targets.sample_count == 1 || targets.sample_count == 2 || targets.sample_count == 4 || targets.sample_count == 8) &&
+           "PSO sample_count must be 1, 2, 4 or 8");
 
     const VkShaderModuleCreateInfo task_module_info{
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -3104,7 +3184,8 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
     };
     const VkPipelineMultisampleStateCreateInfo multisample{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = static_cast<VkSampleCountFlagBits>(targets.sample_count),
+        .alphaToCoverageEnable = targets.alpha_to_coverage,
     };
     const VkPipelineDepthStencilStateCreateInfo depth_stencil{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
@@ -3153,10 +3234,11 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
     }
     const VkPipelineRenderingCreateInfo rendering_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .viewMask = targets.view_mask,
         .colorAttachmentCount = static_cast<uint32>(color_targets.size),
         .pColorAttachmentFormats = color_targets.size ? color_formats : nullptr,
-        .depthAttachmentFormat = to_vk(depth_format),
-        .stencilAttachmentFormat = to_vk(stencil_format),
+        .depthAttachmentFormat = to_vk(targets.depth_format),
+        .stencilAttachmentFormat = to_vk(targets.stencil_format),
     };
     const VkPipelineCreateFlags2CreateInfo flags_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
@@ -3194,14 +3276,17 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
 
 PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept
 {
-    return create_raster_pso(device, desc.vertex, desc.fragment, desc.color_targets, desc.depth_format,
-                             desc.stencil_format, desc.rasterization, false);
+    return create_raster_pso(device, desc.vertex, desc.fragment, {.color_targets = desc.color_targets, .depth_format = desc.depth_format,
+        .stencil_format = desc.stencil_format, .sample_count = desc.sample_count, .alpha_to_coverage = desc.alpha_to_coverage,
+        .view_mask = desc.view_mask}, desc.rasterization, false);
 }
 
 PSO* create_mesh_pso(Device* device, const MeshPSODesc& desc) noexcept
 {
-    return create_raster_pso(device, desc.mesh, desc.fragment, desc.color_targets, desc.depth_format,
-                             desc.stencil_format, desc.rasterization, true, desc.task);
+    assert(desc.view_mask < (1ull << device->caps.max_mesh_multiview_view_count) && "mesh PSO view_mask exceeds DeviceCaps::max_mesh_multiview_view_count");
+    return create_raster_pso(device, desc.mesh, desc.fragment, {.color_targets = desc.color_targets, .depth_format = desc.depth_format,
+        .stencil_format = desc.stencil_format, .sample_count = desc.sample_count, .alpha_to_coverage = desc.alpha_to_coverage,
+        .view_mask = desc.view_mask}, desc.rasterization, true, desc.task);
 }
 
 PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept
@@ -3876,6 +3961,7 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
             .extent = {.width = area_view->width, .height = area_view->height},
         },
         .layerCount = 1,
+        .viewMask = desc.view_mask,
         .colorAttachmentCount = static_cast<uint32>(desc.colors.size),
         .pColorAttachments = color_attachments,
         .pDepthAttachment = desc.depth.render_view ? &depth_attachment : nullptr,
@@ -4070,7 +4156,7 @@ void copy_memory(CommandBuffer* commands, GpuRange source, GpuRange destination)
 
 void copy_memory_to_texture(CommandBuffer* commands, GpuRange source, Texture* destination, const TextureCopyDesc& copy) noexcept
 {
-    assert(commands && commands->state && destination);
+    assert(commands && commands->state && destination && destination->sample_count == 1);
     const VkDeviceMemoryImageCopyKHR region = make_texture_copy_region(*destination, copy, source);
     if (commands->state->buffer_map)
     {
@@ -4099,7 +4185,7 @@ void copy_memory_to_texture(CommandBuffer* commands, GpuRange source, Texture* d
 
 void copy_texture_to_memory(CommandBuffer* commands, Texture* source, GpuRange destination, const TextureCopyDesc& copy) noexcept
 {
-    assert(commands && commands->state && source);
+    assert(commands && commands->state && source && source->sample_count == 1);
     const VkDeviceMemoryImageCopyKHR region = make_texture_copy_region(*source, copy, destination);
     if (commands->state->buffer_map)
     {

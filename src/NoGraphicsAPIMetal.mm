@@ -840,6 +840,11 @@ SizeAlign get_texture_size_align(Device* device, const TextureDesc& desc) noexce
             report_error("unsupported texture format or usage", nil);
             return {};
         }
+        if (desc.sample_count != 1)
+        {
+            report_error("multisample textures are unsupported", nil);
+            return {};
+        }
         MTLTextureDescriptor* descriptor = texture_descriptor(desc);
         const MTLSizeAndAlign result = [device->metal heapTextureSizeAndAlignWithDescriptor:descriptor];
         [descriptor release];
@@ -854,6 +859,7 @@ Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHe
     @autoreleasepool
     {
         assert(device && heap.owner && heap.owner->device == device);
+        if (desc.sample_count != 1) { report_error("multisample textures are unsupported", nil); return nullptr; }
         MTLTextureDescriptor* descriptor = texture_descriptor(desc);
         id<MTLTexture> texture = [heap.owner->heap newTextureWithDescriptor:descriptor offset:offset];
         [descriptor release];
@@ -885,6 +891,7 @@ RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc) noe
 {
     @autoreleasepool
     {
+        if (desc.layer_count != 1) { report_error("multiview render views are unsupported", nil); return nullptr; }
         return new RenderView{.texture = [texture->texture retain], .mip = desc.mip_level, .slice = desc.slice};
     }
 }
@@ -1099,6 +1106,11 @@ void color_targets(MTL4RenderPipelineColorAttachmentDescriptorArray* attachments
 PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept
 {
     assert(desc.vertex.code.size && "Graphics PSOs require a vertex stage");
+    if (desc.sample_count != 1 || desc.alpha_to_coverage || desc.view_mask)
+    {
+        report_error("multisample and multiview pipelines are unsupported", nil);
+        return nullptr;
+    }
     @autoreleasepool
     {
         MTL4RenderPipelineDescriptor* pipeline = [MTL4RenderPipelineDescriptor new];
@@ -1126,6 +1138,11 @@ PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept
 PSO* create_mesh_pso(Device* device, const MeshPSODesc& desc) noexcept
 {
     assert(desc.mesh.code.size && "Mesh PSOs require a mesh stage");
+    if (desc.sample_count != 1 || desc.alpha_to_coverage || desc.view_mask)
+    {
+        report_error("multisample and multiview pipelines are unsupported", nil);
+        return nullptr;
+    }
     @autoreleasepool
     {
         MTL4MeshRenderPipelineDescriptor* pipeline = [MTL4MeshRenderPipelineDescriptor new];
@@ -1624,7 +1641,7 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
 {
     @autoreleasepool
     {
-        assert(commands->recording && !commands->render && commands->pool->kind == QueueKind::general && desc.colors.size <= 8);
+        assert(commands->recording && !commands->render && commands->pool->kind == QueueKind::general && desc.colors.size <= 8 && desc.view_mask == 0);
         end_compute(commands);
         MTL4RenderPassDescriptor* pass = commands->pass;
         RenderView* area = desc.colors.size ? desc.colors.data[0].render_view :

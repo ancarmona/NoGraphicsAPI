@@ -451,6 +451,12 @@ struct DeviceCaps
     bool texture_compression_astc = false;
     bool storage_input_output16 = false;
     bool indirect_mesh_draw = false;
+    // Bit masks of MSAA sample counts (bit value equals count: 1, 2, 4, 8) for float/normalized color and depth/stencil attachments,
+    // and for integer color attachments, that are also sampleable. Formats can support fewer; get_texture_size_align() checks them.
+    uint32 sample_counts = 1;
+    uint32 integer_sample_counts = 1;
+    uint32 max_multiview_view_count = 0; // Views in RenderingDesc::view_mask; zero when multiview rendering is unavailable.
+    uint32 max_mesh_multiview_view_count = 0; // Views in MeshPSODesc::view_mask; zero when mesh PSOs cannot use multiview.
 };
 
 enum class ColorSpace : uint32 { srgb, extended_srgb_linear };
@@ -491,6 +497,9 @@ struct TextureDesc
     uint32 mip_levels = 1;
     uint32 layer_count = 1; // Vulkan array layers; cube faces are individual layers.
     Format format = Format::rgba8_unorm;
+    // 1, 2, 4 or 8, within DeviceCaps::sample_counts (integer_sample_counts for integer formats).
+    // Multisample textures are 2D or 2D arrays with one mip level, no storage usage, and no copies to or from memory.
+    uint8 sample_count = 1;
     bool mutable_format = false; // Allow format-compatible descriptor views, but could lose DCC.
     TextureUsage usage = TextureUsage::sampled;
 };
@@ -499,6 +508,7 @@ struct RenderViewDesc
 {
     uint32 mip_level = 0;
     uint32 slice = 0; // Physical array slice; cube faces are individual slices.
+    uint32 layer_count = 1; // Consecutive slices from slice. More than one creates an array view for multiview rendering.
 };
 
 struct TextureDescriptorDesc
@@ -620,6 +630,9 @@ struct GraphicsPSODesc
     Format depth_format = Format::undefined;
     Format stencil_format = Format::undefined;
     RasterizationState rasterization = {};
+    uint32 sample_count = 1; // Must match the attachment textures' sample_count.
+    bool alpha_to_coverage = false; // Fragment SV_Target0 alpha masks sample coverage.
+    uint32 view_mask = 0; // Must match RenderingDesc::view_mask.
 };
 
 struct MeshPSODesc
@@ -631,6 +644,9 @@ struct MeshPSODesc
     Format depth_format = Format::undefined;
     Format stencil_format = Format::undefined;
     RasterizationState rasterization = {};
+    uint32 sample_count = 1; // Must match the attachment textures' sample_count.
+    bool alpha_to_coverage = false; // Fragment SV_Target0 alpha masks sample coverage.
+    uint32 view_mask = 0; // Must match RenderingDesc::view_mask; views are limited by DeviceCaps::max_mesh_multiview_view_count.
 };
 
 struct ClearColor
@@ -670,6 +686,9 @@ struct RenderingDesc
     Span<const ColorAttachment> colors = {};
     DepthAttachment depth = {};
     StencilAttachment stencil = {};
+    // Multiview: bit i renders view i (SV_ViewID) into layer i of every attachment's render view. Zero renders one layer.
+    // The highest set bit must be below DeviceCaps::max_multiview_view_count and each render view's layer_count.
+    uint32 view_mask = 0;
 };
 
 enum class RenderingFlags : uint32

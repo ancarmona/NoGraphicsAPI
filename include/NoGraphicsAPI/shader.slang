@@ -69,6 +69,19 @@ T gpu_sampler<T : IOpaqueDescriptor = SamplerState>(uint index)
 
 #endif
 
+// Multisample textures (Vulkan only). Load(int2 pixel, int sample_index) reads one sample; Load(int3(pixel, layer), sample_index) for arrays.
+[ForceInline]
+Texture2DMS<T> gpu_texture_ms<T : ITexelElement>(uint index)
+{
+    return gpu_texture<Texture2DMS<T>>(index);
+}
+
+[ForceInline]
+Texture2DMSArray<T> gpu_texture_ms_array<T : ITexelElement>(uint index)
+{
+    return gpu_texture<Texture2DMSArray<T>>(index);
+}
+
 [ForceInline]
 uint gpu_nonuniform_index(uint index)
 {
