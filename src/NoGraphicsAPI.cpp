@@ -439,6 +439,7 @@ constexpr VkPipelineStageFlags2 to_vk(Stage stages)
     if (has_flag(stages, Stage::transfer)) result |= VK_PIPELINE_STAGE_2_COPY_BIT;
     if (has_flag(stages, Stage::host)) result |= VK_PIPELINE_STAGE_2_HOST_BIT;
     if (has_flag(stages, Stage::all_commands)) result |= VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    if (has_flag(stages, Stage::acceleration_structure_build)) result |= VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
     return result;
 }
 
@@ -465,6 +466,8 @@ VkAccessFlags2 to_vk(Access accesses, bool descriptor_heap)
     if (has_flag(accesses, Access::host_write)) result |= VK_ACCESS_2_HOST_WRITE_BIT;
     if (has_flag(accesses, Access::descriptor_read)) result |= descriptor_heap
         ? VK_ACCESS_2_SAMPLER_HEAP_READ_BIT_EXT | VK_ACCESS_2_RESOURCE_HEAP_READ_BIT_EXT : VK_ACCESS_2_DESCRIPTOR_BUFFER_READ_BIT_EXT;
+    if (has_flag(accesses, Access::acceleration_structure_read)) result |= VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    if (has_flag(accesses, Access::acceleration_structure_write)) result |= VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     return result;
 }
 
@@ -474,6 +477,10 @@ constexpr VkBufferUsageFlags universal_buffer_usage =
     VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 // Including uniform-buffer usage guarantees that the base device address can host a native heap root at offset zero.
 constexpr VkBufferUsageFlags native_root_buffer_usage = universal_buffer_usage | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+// A ray_query device's GPU heaps also hold acceleration structure build inputs and build scratch (scratch needs storage usage)
+constexpr VkBufferUsageFlags ray_query_buffer_usage =
+    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
 constexpr VkMemoryPropertyFlags cpu_visible_memory_properties =
     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
@@ -496,6 +503,8 @@ bool is_usable_memory_type(const VkPhysicalDeviceMemoryProperties& properties, u
 
 constexpr VkAddressCommandFlagsKHR address_flags =
     VK_ADDRESS_COMMAND_FULLY_BOUND_BIT_KHR;
+// A ray_query device's heaps have storage buffer usage (acceleration structure scratch): its address commands say so
+constexpr VkAddressCommandFlagsKHR ray_query_address_flags = address_flags | VK_ADDRESS_COMMAND_STORAGE_BUFFER_USAGE_BIT_KHR;
 } // namespace
 
 namespace detail
@@ -522,6 +531,12 @@ struct DeviceFunctions
     PFN_vkCmdCopyMemoryKHR cmd_copy_memory = nullptr;
     PFN_vkCmdCopyMemoryToImageKHR cmd_copy_memory_to_image = nullptr;
     PFN_vkCmdCopyImageToMemoryKHR cmd_copy_image_to_memory = nullptr;
+    // DeviceCaps::ray_query
+    PFN_vkGetAccelerationStructureBuildSizesKHR get_acceleration_structure_build_sizes = nullptr;
+    PFN_vkCreateAccelerationStructureKHR create_acceleration_structure = nullptr;
+    PFN_vkDestroyAccelerationStructureKHR destroy_acceleration_structure = nullptr;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR get_acceleration_structure_address = nullptr;
+    PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_acceleration_structures = nullptr;
 };
 
 struct BackingBuffer
@@ -737,6 +752,9 @@ struct Device
     uint32 texture_memory_type = VK_MAX_MEMORY_TYPES;
     detail::DeviceFunctions fn;
     detail::BufferAddressMap* buffer_map = nullptr;
+    VkBufferUsageFlags gpu_heap_usage = universal_buffer_usage; // | ray_query_buffer_usage on a ray_query device
+    VkDeviceSize scratch_alignment = 0; // minAccelerationStructureScratchOffsetAlignment
+    VkAddressCommandFlagsKHR address_flags = gpu::address_flags; // ray_query_address_flags on a ray_query device
     // VK_KHR_calibrated_timestamps (or the EXT): the GPU timestamp and a host clock read together
     PFN_vkGetCalibratedTimestampsKHR get_calibrated_timestamps = nullptr;
     VkTimeDomainKHR host_time_domain = VK_TIME_DOMAIN_DEVICE_KHR;
@@ -1371,7 +1389,8 @@ GpuHeap Device::allocate_gpu_heap(VkDeviceSize size, MemoryType memory) noexcept
     }
 
     GpuHeapOwner* heap = new GpuHeapOwner{.state = this};
-    const VkBufferUsageFlags usage = descriptor_heap ? native_root_buffer_usage : universal_buffer_usage;
+    // gpu_heap_usage adds the acceleration structure build inputs on a ray-query device
+    const VkBufferUsageFlags usage = (descriptor_heap ? native_root_buffer_usage : universal_buffer_usage) | gpu_heap_usage;
     if (!create_backing_buffer(heap->backing, size, usage, required, preferred, avoided))
     {
         delete heap;
@@ -1589,8 +1608,11 @@ struct QueriedFeatures
     VkPhysicalDeviceMeshShaderFeaturesEXT mesh_shader{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
     VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR swapchain_maintenance1{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR};
     VkPhysicalDevicePresentTimingFeaturesEXT present_timing{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_TIMING_FEATURES_EXT};
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+    VkPhysicalDeviceRayQueryFeaturesKHR ray_query{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
 
-    explicit QueriedFeatures(bool presentation, bool include_unified_image_layouts, bool include_address_commands, bool native_heap, bool relative_present)
+    explicit QueriedFeatures(bool presentation, bool include_unified_image_layouts, bool include_address_commands, bool native_heap, bool relative_present,
+                             bool include_ray_query = false)
     {
         core.pNext = &vulkan11;
         vulkan11.pNext = &vulkan12;
@@ -1613,6 +1635,12 @@ struct QueriedFeatures
         {
             present_timing.pNext = mesh_shader.pNext;
             mesh_shader.pNext = &present_timing;
+        }
+        if (include_ray_query)
+        {
+            ray_query.pNext = mesh_shader.pNext;
+            acceleration_structure.pNext = &ray_query;
+            mesh_shader.pNext = &acceleration_structure;
         }
     }
 };
@@ -1640,6 +1668,7 @@ struct Candidate
     bool swapchain_maintenance = false;
     bool relative_present = false;
     bool descriptor_heap = false;
+    bool ray_query = false; // VK_KHR_acceleration_structure, VK_KHR_ray_query and VK_KHR_deferred_host_operations, with their features
     VkPhysicalDeviceDescriptorHeapPropertiesEXT heap_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT};
     VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT};
     VkPhysicalDeviceVulkan11Properties vulkan11_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
@@ -1749,8 +1778,11 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
     const bool timing_extensions = surface && has_name({extensions, extension_count}, VK_EXT_PRESENT_TIMING_EXTENSION_NAME, 3)
         && has_name({extensions, extension_count}, VK_KHR_PRESENT_ID_2_EXTENSION_NAME)
         && has_name({extensions, extension_count}, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    const bool ray_query_extensions = has_name({extensions, extension_count}, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+                                      has_name({extensions, extension_count}, VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+                                      has_name({extensions, extension_count}, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
     QueriedFeatures features(surface && (khr_swapchain_maintenance1 || ext_swapchain_maintenance1),
-                             unified_image_layouts_extension, address_commands_extension, native_heap, timing_extensions);
+                             unified_image_layouts_extension, address_commands_extension, native_heap, timing_extensions, ray_query_extensions);
     vkGetPhysicalDeviceFeatures2(physical_device, &features.core);
     struct RequiredFeature { VkBool32 available; const char* name; };
     const RequiredFeature required_features[]{
@@ -1810,6 +1842,9 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
     result.swapchain_maintenance = false;
 #endif
     result.descriptor_heap = native_heap;
+    // The shaders convert a 64-bit address into the structure (OpConvertUToAccelerationStructureKHR): 64-bit integers come with it
+    result.ray_query = ray_query_extensions && features.acceleration_structure.accelerationStructure == VK_TRUE &&
+                       features.ray_query.rayQuery == VK_TRUE && features.core.features.shaderInt64 == VK_TRUE;
 
     uint32 available_queue_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &available_queue_count, nullptr);
@@ -2202,8 +2237,11 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     }
 
     QueriedFeatures enabled_features(state->swapchain_maintenance, selected.unified_image_layouts, selected.address_commands,
-                                     state->descriptor_heap, selected.relative_present);
+                                     state->descriptor_heap, selected.relative_present, selected.ray_query);
     enabled_features.present_timing.presentAtRelativeTime = selected.relative_present;
+    enabled_features.acceleration_structure.accelerationStructure = VK_TRUE;
+    enabled_features.ray_query.rayQuery = VK_TRUE;
+    if (selected.ray_query) enabled_features.core.features.shaderInt64 = VK_TRUE;
     state->texture_compression_etc2 = selected.texture_compression_etc2;
     enabled_features.core.features.imageCubeArray = selected.image_cube_array;
     enabled_features.core.features.samplerAnisotropy = VK_TRUE;
@@ -2270,7 +2308,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         };
         first_queue += queue_counts[type];
     }
-    const char* enabled_device_extensions[12]{};
+    const char* enabled_device_extensions[16]{};
     uint32 enabled_device_extension_count = 0;
     // Calibrated timestamps, to put GPU timestamps on the CPU clock; optional
     const char* calibrated_extension = nullptr;
@@ -2297,6 +2335,12 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME;
     }
     enabled_device_extensions[enabled_device_extension_count++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
+    if (selected.ray_query)
+    {
+        enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
+        enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_RAY_QUERY_EXTENSION_NAME;
+        enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
+    }
 #if defined(_WIN32)
     if (presentation)
     {
@@ -2305,7 +2349,9 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         {
             enabled_device_extensions[enabled_device_extension_count++] = VK_EXT_PRESENT_TIMING_EXTENSION_NAME;
             enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_PRESENT_ID_2_EXTENSION_NAME;
-            enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+            // Enabled once: the calibrated timestamps above may have enabled it already
+            if (!calibrated_extension || strcmp(calibrated_extension, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) != 0)
+                enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
         }
         if (state->swapchain_maintenance)
             enabled_device_extensions[enabled_device_extension_count++] = selected.khr_swapchain_maintenance1
@@ -2432,6 +2478,30 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         state->buffer_map = new detail::BufferAddressMap{};
     }
 
+    if (selected.ray_query)
+    {
+        state->fn.get_acceleration_structure_build_sizes =
+            load_device_proc<PFN_vkGetAccelerationStructureBuildSizesKHR>(state->device, "vkGetAccelerationStructureBuildSizesKHR");
+        state->fn.create_acceleration_structure = load_device_proc<PFN_vkCreateAccelerationStructureKHR>(state->device, "vkCreateAccelerationStructureKHR");
+        state->fn.destroy_acceleration_structure = load_device_proc<PFN_vkDestroyAccelerationStructureKHR>(state->device, "vkDestroyAccelerationStructureKHR");
+        state->fn.get_acceleration_structure_address =
+            load_device_proc<PFN_vkGetAccelerationStructureDeviceAddressKHR>(state->device, "vkGetAccelerationStructureDeviceAddressKHR");
+        state->fn.cmd_build_acceleration_structures =
+            load_device_proc<PFN_vkCmdBuildAccelerationStructuresKHR>(state->device, "vkCmdBuildAccelerationStructuresKHR");
+        if (!state->fn.get_acceleration_structure_build_sizes || !state->fn.create_acceleration_structure || !state->fn.destroy_acceleration_structure ||
+            !state->fn.get_acceleration_structure_address || !state->fn.cmd_build_acceleration_structures)
+        {
+            return fail_device_creation(state, Error::driver_error, "The graphics driver did not provide the enabled acceleration structure commands.");
+        }
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR acceleration_properties{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+        VkPhysicalDeviceProperties2 properties{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &acceleration_properties};
+        vkGetPhysicalDeviceProperties2(state->physical_device, &properties);
+        state->scratch_alignment = acceleration_properties.minAccelerationStructureScratchOffsetAlignment;
+        state->gpu_heap_usage = universal_buffer_usage | ray_query_buffer_usage;
+        state->address_flags = ray_query_address_flags;
+    }
+
     if (presentation)
     {
         const VkSemaphoreTypeCreateInfo type_info{
@@ -2478,6 +2548,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         .max_multiview_view_count = selected.vulkan11_properties.maxMultiviewViewCount,
         .max_mesh_multiview_view_count = selected.multiview_mesh_shader ? selected.mesh_properties.maxMeshMultiviewViewCount : 0u,
         .max_sampler_anisotropy = limits.maxSamplerAnisotropy,
+        .ray_query = selected.ray_query,
     };
     if (presentation)
     {
@@ -4458,7 +4529,7 @@ VkDeviceMemoryImageCopyKHR make_texture_copy_region(const Texture& texture, cons
             .address = static_cast<VkDeviceAddress>(reinterpret_cast<uintptr>(memory.gpu)),
             .size = memory.size,
         },
-        .addressFlags = address_flags,
+        .addressFlags = texture.state->address_flags,
         .addressRowLength = static_cast<uint32>(copy.row_pitch_bytes / format_info.bytes_per_block * format_info.block_extent.x),
         .addressImageHeight = copy.slice_pitch_bytes == 0 ? 0u : static_cast<uint32>(copy.slice_pitch_bytes / row_pitch * format_info.block_extent.y),
         .imageSubresource = {
@@ -4511,7 +4582,7 @@ void bind_indices(CommandBuffer* commands, GpuRange indices, IndexType type) noe
             .address = static_cast<VkDeviceAddress>(reinterpret_cast<uintptr>(indices.gpu)),
             .size = indices.size,
         },
-        .addressFlags = address_flags,
+        .addressFlags = commands->state->address_flags,
         .indexType = static_cast<VkIndexType>(type),
     };
     commands->state->fn.cmd_bind_index_buffer(commands->command_buffer, &info);
@@ -4763,7 +4834,7 @@ void draw_indirect(CommandBuffer* commands, const void* root, GpuRange arguments
             .size = arguments.size,
             .stride = stride == 0 ? sizeof(VkDrawIndirectCommand) : stride,
         },
-        .addressFlags = address_flags,
+        .addressFlags = commands->state->address_flags,
         .drawCount = draw_count,
     };
     commands->state->fn.cmd_draw_indirect(commands->command_buffer, &info);
@@ -4789,7 +4860,7 @@ void draw_indexed_indirect(CommandBuffer* commands, const void* root, GpuRange i
             .size = arguments.size,
             .stride = stride == 0 ? sizeof(VkDrawIndexedIndirectCommand) : stride,
         },
-        .addressFlags = address_flags,
+        .addressFlags = commands->state->address_flags,
         .drawCount = draw_count,
     };
     commands->state->fn.cmd_draw_indexed_indirect(commands->command_buffer, &info);
@@ -4819,7 +4890,7 @@ void dispatch_indirect(CommandBuffer* commands, const void* root, GpuRange argum
             .address = static_cast<VkDeviceAddress>(reinterpret_cast<uintptr>(arguments.gpu)),
             .size = arguments.size,
         },
-        .addressFlags = address_flags,
+        .addressFlags = commands->state->address_flags,
     };
     commands->state->fn.cmd_dispatch_indirect(commands->command_buffer, &info);
 }
@@ -4851,7 +4922,7 @@ void draw_meshlets_indirect(CommandBuffer* commands, const void* root, GpuRange 
             .size = arguments.size,
             .stride = stride == 0 ? sizeof(VkDrawMeshTasksIndirectCommandEXT) : stride,
         },
-        .addressFlags = address_flags,
+        .addressFlags = commands->state->address_flags,
         .drawCount = draw_count,
     };
     commands->state->fn.cmd_draw_mesh_tasks_indirect(commands->command_buffer, &info);
@@ -4889,12 +4960,12 @@ void copy_memory(CommandBuffer* commands, GpuRange source, GpuRange destination)
             .address = static_cast<VkDeviceAddress>(reinterpret_cast<uintptr>(source.gpu)),
             .size = source.size,
         },
-        .srcFlags = address_flags,
+        .srcFlags = commands->state->address_flags,
         .dstRange = {
             .address = static_cast<VkDeviceAddress>(reinterpret_cast<uintptr>(destination.gpu)),
             .size = destination.size,
         },
-        .dstFlags = address_flags,
+        .dstFlags = commands->state->address_flags,
     };
     const VkCopyDeviceMemoryInfoKHR info{
         .sType = VK_STRUCTURE_TYPE_COPY_DEVICE_MEMORY_INFO_KHR,
@@ -4976,4 +5047,131 @@ void barrier(CommandBuffer* commands, Stage before, Access before_access, Stage 
     pending.dstAccessMask |= to_vk(after_access, commands->state->descriptor_heap);
 }
 
+// Ray tracing (DeviceCaps::ray_query): VK_KHR_acceleration_structure, built on the device, read by VK_KHR_ray_query
+struct AccelerationStructure
+{
+    Device* state = nullptr;
+    detail::BackingBuffer storage{};
+    VkAccelerationStructureKHR handle = VK_NULL_HANDLE;
+    VkDeviceAddress address = 0;
+};
+
+namespace
+{
+
+struct AccelerationStructureBuildInfo
+{
+    VkAccelerationStructureGeometryKHR geometry{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    VkAccelerationStructureBuildGeometryInfoKHR build{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    uint32 primitive_count = 0;
+
+    explicit AccelerationStructureBuildInfo(const AccelerationStructureDesc& desc) noexcept
+    {
+        if (desc.type == AccelerationStructureType::bottom_level)
+        {
+            geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+            geometry.geometry.aabbs = {
+                .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR,
+                .data = {.deviceAddress = reinterpret_cast<VkDeviceAddress>(desc.aabbs.aabbs.gpu)},
+                .stride = desc.aabbs.stride,
+            };
+            geometry.flags = desc.aabbs.opaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
+            primitive_count = desc.aabbs.count;
+        }
+        else
+        {
+            geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+            geometry.geometry.instances = {
+                .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+                .arrayOfPointers = VK_FALSE,
+                .data = {.deviceAddress = reinterpret_cast<VkDeviceAddress>(desc.instances.gpu)},
+            };
+            primitive_count = desc.instance_count;
+        }
+        build.type = desc.type == AccelerationStructureType::bottom_level ? VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR
+                                                                          : VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        build.flags = desc.fast_build ? VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR : VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        build.geometryCount = 1;
+        build.pGeometries = &geometry;
+    }
+};
+
+static_assert(sizeof(AccelerationStructureInstance) == sizeof(VkAccelerationStructureInstanceKHR));
+
+} // namespace
+
+AccelerationStructureSizes get_acceleration_structure_sizes(Device* device, const AccelerationStructureDesc& desc) noexcept
+{
+    assert(device->caps.ray_query);
+    AccelerationStructureBuildInfo info(desc);
+    VkAccelerationStructureBuildSizesInfoKHR sizes{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    device->fn.get_acceleration_structure_build_sizes(device->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info.build,
+                                                      &info.primitive_count, &sizes);
+    return {.storage = sizes.accelerationStructureSize, .scratch = sizes.buildScratchSize, .scratch_alignment = device->scratch_alignment};
+}
+
+AccelerationStructure* create_acceleration_structure(Device* device, AccelerationStructureType type, uint64 size) noexcept
+{
+    assert(device->caps.ray_query);
+    AccelerationStructure* structure = new AccelerationStructure{.state = device};
+    if (!device->create_backing_buffer(structure->storage, size,
+                                       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+    {
+        delete structure;
+        return nullptr;
+    }
+    const VkAccelerationStructureCreateInfoKHR create_info{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        .buffer = structure->storage.buffer,
+        .size = size,
+        .type = type == AccelerationStructureType::bottom_level ? VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR
+                                                                : VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+    };
+    if (error_from_vk(device->fn.create_acceleration_structure(device->device, &create_info, nullptr, &structure->handle),
+                      "vkCreateAccelerationStructureKHR", size) != Error::none)
+    {
+        vkDestroyBuffer(device->device, structure->storage.buffer, nullptr);
+        vkFreeMemory(device->device, structure->storage.memory, nullptr);
+        delete structure;
+        return nullptr;
+    }
+    const VkAccelerationStructureDeviceAddressInfoKHR address_info{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        .accelerationStructure = structure->handle,
+    };
+    structure->address = device->fn.get_acceleration_structure_address(device->device, &address_info);
+    return structure;
+}
+
+void destroy_acceleration_structure(AccelerationStructure* structure) noexcept
+{
+    if (!structure) return;
+    Device* device = structure->state;
+    device->fn.destroy_acceleration_structure(device->device, structure->handle, nullptr);
+    vkDestroyBuffer(device->device, structure->storage.buffer, nullptr);
+    vkFreeMemory(device->device, structure->storage.memory, nullptr);
+    delete structure;
+}
+
+uint64 get_acceleration_structure_address(const AccelerationStructure* structure) noexcept
+{
+    return structure->address;
+}
+
+void build_acceleration_structure(CommandBuffer* commands, AccelerationStructure* destination, const AccelerationStructureDesc& desc,
+                                  GpuRange scratch) noexcept
+{
+    assert(commands->state->caps.ray_query);
+    assert(commands->state->scratch_alignment == 0 || reinterpret_cast<uintptr>(scratch.gpu) % commands->state->scratch_alignment == 0);
+    AccelerationStructureBuildInfo info(desc);
+    info.build.dstAccelerationStructure = destination->handle;
+    info.build.scratchData.deviceAddress = reinterpret_cast<VkDeviceAddress>(scratch.gpu);
+    const VkAccelerationStructureBuildRangeInfoKHR range{.primitiveCount = info.primitive_count};
+    const VkAccelerationStructureBuildRangeInfoKHR* ranges = &range;
+    commands->state->fn.cmd_build_acceleration_structures(commands->command_buffer, 1, &info.build, &ranges);
+}
+
 } // namespace gpu
+
