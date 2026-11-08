@@ -694,11 +694,13 @@ bool get_calibrated_timestamps(Device* device, CalibratedTimestamps& out) noexce
         const uint64 uptime_after = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         const uint64 raw_after = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
         if (!cpu || !gpu) return false;
-        const uint64 asleep = ((raw_before - uptime_before) + (raw_after - uptime_after)) / 2;
+        // Signed: when the machine has not slept since boot the two clocks are equal, and each difference is a few nanoseconds of
+        // either sign (the reads' order); unsigned, a negative one wrapped the offset to about 2^63
+        const int64 asleep = (static_cast<int64>(raw_before - uptime_before) + static_cast<int64>(raw_after - uptime_after)) / 2;
         mach_timebase_info_data_t timebase = {};
         mach_timebase_info(&timebase);
         out.gpu = static_cast<uint64>((static_cast<unsigned __int128>(gpu) * timebase.denom) / timebase.numer);
-        out.host = cpu + asleep;
+        out.host = static_cast<uint64>(static_cast<int64>(cpu) + asleep);
         out.max_deviation_ns = (uptime_after - uptime_before) + (raw_after - raw_before);
         out.host_domain = HostTimeDomain::clock_monotonic_raw;
         return true;
