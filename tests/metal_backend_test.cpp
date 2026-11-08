@@ -369,10 +369,15 @@ uint32 stub_errors = 0;
 
 void count_stub_error(const char*, bool) noexcept { ++stub_errors; }
 
-// Ray queries are not on Metal yet: the capability is false, and every call fails with an error and an empty result in every build
+// A device without ray tracing (DeviceCaps::ray_query false): every call fails with an error and an empty result in every build
 bool test_ray_query_stubs(gpu::Device* device) noexcept
 {
     const bool capability = gpu::get_device_caps(device).ray_query;
+    if (capability)
+    {
+        printf("Ray query stubs: ray_query true, the real path is tested by test_ray_query\n");
+        return true;
+    }
     gpu::set_error_callback(count_stub_error);
     const gpu::AccelerationStructureDesc desc{.type = gpu::AccelerationStructureType::bottom_level};
     const gpu::AccelerationStructureSizes sizes = gpu::get_acceleration_structure_sizes(device, desc);

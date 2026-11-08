@@ -938,10 +938,11 @@ void draw_meshlets(CommandBuffer* commands, const void* root, uint32x3 group_cou
 // Requires DeviceCaps::indirect_mesh_draw. Direct task/mesh draws remain available on every supported device.
 void draw_meshlets_indirect(CommandBuffer* commands, const void* root, GpuRange arguments, uint32 draw_count = 1, uint32 stride = 0) noexcept;
 
-// Ray tracing: acceleration structures for inline ray queries (DeviceCaps::ray_query; Vulkan only for now).
+// Ray tracing: acceleration structures for inline ray queries (DeviceCaps::ray_query; Vulkan, and Metal 4 in compute).
 // The structure lives in storage of its own, made by create_acceleration_structure; the shader receives its 64-bit address
-// (get_acceleration_structure_address) in its root data, like any GPU pointer, and makes the handle from it
-// (Slang: RaytracingAccelerationStructure(address); SPIR-V OpConvertUToAccelerationStructureKHR).
+// (get_acceleration_structure_address: Vulkan's device address, Metal's MTLResourceID) in its root data, like any GPU pointer, and
+// makes the handle from it (shader.slang: gpu_acceleration_structure_from_id; SPIR-V OpConvertUToAccelerationStructureKHR).
+// Metal reads a top level's instances at record time (build_acceleration_structure): put them in CPU-visible memory.
 // Build inputs and scratch are ordinary GPU heap memory: the heaps of a ray_query device can hold them.
 enum class AccelerationStructureType : uint8
 {

@@ -115,6 +115,21 @@ add_test(NAME test_copy_queue COMMAND test_queue_families --copy)
 set_tests_properties(test_queue_families test_compute_queue test_copy_queue PROPERTIES
     SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
 
+# Ray queries end to end (DeviceCaps::ray_query: Vulkan and Metal; skipped without)
+set(ray_query_shader ${CMAKE_CURRENT_BINARY_DIR}/shaders/ray_query.comp.${NOGRAPHICSAPI_SHADER_EXTENSION})
+NoGraphicsAPI_compile_slang(${ray_query_shader} ${CMAKE_CURRENT_SOURCE_DIR}/ray_query.slang computeMain compute
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ray_query_shared.h ${PROJECT_SOURCE_DIR}/include/NoGraphicsAPI/shader.slang)
+add_executable(test_ray_query ray_query_test.cpp ${ray_query_shader})
+NoGraphicsAPI_disable_exceptions(test_ray_query)
+target_link_libraries(test_ray_query PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::types)
+target_compile_definitions(test_ray_query PRIVATE NOGRAPHICSAPI_RAY_QUERY_SHADER="${ray_query_shader}")
+add_test(NAME test_ray_query COMMAND test_ray_query)
+set_tests_properties(test_ray_query PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
+if(APPLE)
+    set_tests_properties(test_ray_query PROPERTIES ENVIRONMENT "MTL_DEBUG_LAYER=1")
+endif()
+
 set(continuation_vertex_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/render_continuation.vert.${NOGRAPHICSAPI_SHADER_EXTENSION})
 set(continuation_fragment_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/render_continuation.frag.${NOGRAPHICSAPI_SHADER_EXTENSION})
 NoGraphicsAPI_compile_slang(${continuation_vertex_spv} ${CMAKE_CURRENT_SOURCE_DIR}/render_continuation.slang vertexMain vertex)

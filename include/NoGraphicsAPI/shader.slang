@@ -69,6 +69,22 @@ T gpu_sampler<T : IOpaqueDescriptor = SamplerState>(uint index)
 
 #endif
 
+// An acceleration structure from get_acceleration_structure_address's value (DeviceCaps::ray_query). Vulkan: the structure's device
+// address (OpConvertUToAccelerationStructureKHR). Metal: its MTLResourceID, whose 8 bytes are the handle (as gpu_texture_from_id for
+// textures; Slang has no RaytracingAccelerationStructure(address) for Metal)
+[ForceInline]
+RaytracingAccelerationStructure gpu_acceleration_structure_from_id(uint64_t id)
+{
+    __target_switch
+    {
+    case metal:
+        __requirePrelude(R"(template<typename T> T gpu_texture_from_id(ulong id) { return *reinterpret_cast<thread T*>(&id); })");
+        __intrinsic_asm "gpu_texture_from_id<metal::raytracing::instance_acceleration_structure>($0)";
+    default:
+        return RaytracingAccelerationStructure(id);
+    }
+}
+
 // Multisample textures (Vulkan and Metal). Load(int2 pixel, int sample_index) reads one sample; Load(int3(pixel, layer), sample_index) for arrays.
 [ForceInline]
 Texture2DMS<T> gpu_texture_ms<T : ITexelElement>(uint index)

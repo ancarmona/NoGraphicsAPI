@@ -95,6 +95,26 @@ This adds one submission per frame and gives up framebuffer-only drawable optimi
 The flag has no effect on Vulkan, iOS or headless devices.
 Use three drawables to keep scanout from starving a two-frame renderer on Apple displays.
 
+## Ray queries
+
+`DeviceCaps::ray_query` is `supportsRaytracing`. Metal 4 acceleration structures are read by intersection queries in compute kernels.
+
+- Bottom levels hold axis-aligned boxes: one `MTL4AccelerationStructureBoundingBoxGeometryDescriptor` (`MTLAxisAlignedBoundingBoxes`,
+  the same six floats as Vulkan's AABBs). A ray query sees each box as a procedural candidate.
+- Top levels: Metal 4 accepts only "indirect" instance records (72 bytes, with the bottom level's `MTLResourceID`), not the API's
+  64-byte `AccelerationStructureInstance` (Vulkan's layout). `build_acceleration_structure` converts them **at record time** from
+  CPU-visible memory into a buffer that the command buffer keeps until it is reset. The transform is copied as is: the layout is set
+  row-major. The custom index becomes the user ID, and the flags keep their bit values.
+- `get_acceleration_structure_address` returns the structure's `MTLResourceID`. In a shader, `gpu_acceleration_structure_from_id`
+  (`shader.slang`) makes the handle from it, as `gpu_texture_from_id` does for textures. Slang has no
+  `RaytracingAccelerationStructure(address)` for Metal.
+- Every structure, and every converted instance buffer, is in the device's residency set. `Stage::acceleration_structure_build` maps
+  to `MTLStageAccelerationStructure`.
+- The scratch alignment is 256 bytes: Metal states none (not verified).
+
+`test_ray_query` builds a bottom level of boxes and a top level of two instances (one translated), traces rays with masks and t
+ranges in compute, and checks the committed hits.
+
 ## Synchronization
 
 Compute encoders are implicit: binding a compute PSO opens one, and dispatches reuse it until a barrier,

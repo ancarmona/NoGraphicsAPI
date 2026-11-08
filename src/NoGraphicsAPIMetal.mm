@@ -42,6 +42,7 @@ MTLStages barrier_stages(Stage stages, bool source)
     if (mask & static_cast<uint64>(Stage::depth_stencil_tests | Stage::fragment | Stage::color_output)) result |= raster | (source ? geometry : 0);
     if (mask & static_cast<uint64>(Stage::compute)) result |= MTLStageDispatch;
     if (mask & static_cast<uint64>(Stage::transfer)) result |= MTLStageBlit;
+    if (mask & static_cast<uint64>(Stage::acceleration_structure_build)) result |= MTLStageAccelerationStructure;
     return result;
 }
 
@@ -269,6 +270,10 @@ struct CommandBuffer
     bool render_continuation = false;
     bool acquired = false;
     const PSO* pso = nullptr;
+    // Top-level builds: the instances in Metal's layout, written at record time, kept until the command buffer is reset
+    id<MTLBuffer>* instance_uploads = nullptr;
+    uint32 instance_upload_count = 0;
+    uint32 instance_upload_capacity = 0;
 };
 
 struct DepthStateEntry
@@ -345,6 +350,17 @@ void remove_resident(Device* device, id<MTLAllocation> allocation)
     [device->residency removeAllocation:allocation];
     [device->residency commit];
     os_unfair_lock_unlock(&device->residency_lock);
+}
+
+// The top-level builds' instance buffers of a command buffer whose GPU work is over (reset) or that goes away
+void release_instance_uploads(Device* device, CommandBuffer* commands)
+{
+    for (uint32 i = 0; i < commands->instance_upload_count; ++i)
+    {
+        remove_resident(device, commands->instance_uploads[i]);
+        [commands->instance_uploads[i] release];
+    }
+    commands->instance_upload_count = 0;
 }
 
 bool allocate_timestamps(Device* device, TimestampSlot* slots)
@@ -426,6 +442,8 @@ void destroy_context(Device* device, CommandBuffer* commands)
         delete native;
         native = next;
     }
+    release_instance_uploads(device, commands);
+    delete[] commands->instance_uploads;
     [commands->arguments release];
     [commands->pass release];
     for (uint32 i = 0; i < device->timestamp_query_count && commands->timestamps && commands->timestamps[i].page;)
@@ -615,6 +633,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
             if ([device->metal supportsVertexAmplificationCount:count]) device->caps.max_multiview_view_count = count;
         device->caps.max_mesh_multiview_view_count = device->caps.max_multiview_view_count;
         device->caps.max_sampler_anisotropy = 16.0f; // MTLSamplerDescriptor.maxAnisotropy: 1 to 16
+        device->caps.ray_query = device->metal.supportsRaytracing; // acceleration structures and intersection queries in compute
         if (desc.window)
         {
             device->layer = [(CAMetalLayer*)desc.window retain];
@@ -1345,6 +1364,7 @@ void reset_command_pool(CommandPool* pool) noexcept
             commands->ended = false;
             commands->retirement = nil;
             commands->retirement_value = 0;
+            release_instance_uploads(pool->device, commands);
             for (NativeCommandBuffer* native = commands->native_buffers; native; native = native->next) [native->allocator reset];
         }
         pool->next_buffer = pool->first;
@@ -1612,7 +1632,8 @@ void barrier(CommandBuffer* commands, Stage before, Access before_access, Stage 
         const MTLStages destination = barrier_stages(after, false);
         // Shared-event completion provides host visibility; a host-only destination blocks no future GPU stages.
         if (!source || !destination) return;
-        const uint64 writes = static_cast<uint64>(Access::transfer_write | Access::shader_write | Access::color_write | Access::depth_stencil_write);
+        const uint64 writes = static_cast<uint64>(Access::transfer_write | Access::shader_write | Access::color_write | Access::depth_stencil_write |
+                                                  Access::acceleration_structure_write);
         const MTL4VisibilityOptions visibility = (static_cast<uint64>(before_access) & writes) ? MTL4VisibilityOptionDevice : MTL4VisibilityOptionNone;
         [compute_encoder(commands) barrierAfterStages:source beforeQueueStages:destination visibilityOptions:visibility];
         end_compute(commands);
@@ -1990,39 +2011,177 @@ void draw_meshlets_indirect(CommandBuffer* commands, const void* root, GpuRange 
     }
 }
 
-// Ray tracing: not on Metal yet (DeviceCaps::ray_query is false). Metal 4 has acceleration structures (MTL4AccelerationStructure
-// descriptors, bounding-box geometry) and intersection queries in compute; Slang's Metal output does not lower RayQuery with
-// procedural candidates yet. These keep the API linkable; callers check the capability first.
+// Ray tracing (DeviceCaps::ray_query: supportsRaytracing): Metal 4 acceleration structures, read by intersection queries in compute.
+// Bottom levels: one MTL4AccelerationStructureBoundingBoxGeometryDescriptor (MTLAxisAlignedBoundingBoxes: six floats, as Vulkan's
+// AABBs). Top levels: Metal 4 takes only "indirect" instance records (72 bytes: the transform, options, mask, intersection function
+// table offset, user ID, the bottom level's MTLResourceID), not Vulkan's 64-byte AccelerationStructureInstance; the build converts
+// them at record time, from CPU-visible memory, into a buffer the command buffer keeps until it is reset (the transform as is: the
+// layout is set row-major). get_acceleration_structure_address gives the structure's MTLResourceID (64 bits): a top level's instance
+// names its bottom level by it, and a shader makes the handle from it (shader.slang: gpu_acceleration_structure_from_id).
 struct AccelerationStructure
 {
+    Device* device = nullptr;
+    id<MTLAccelerationStructure> structure = nil;
+    AccelerationStructureType type = AccelerationStructureType::bottom_level;
 };
 
-// Called anyway: an error and an empty result in every build (no assert-only check)
-AccelerationStructureSizes get_acceleration_structure_sizes(Device*, const AccelerationStructureDesc&) noexcept
+namespace
 {
-    report_error("acceleration structure sizes (ray queries are not supported on Metal yet: DeviceCaps::ray_query is false)", nil);
-    return {};
+static_assert(sizeof(AccelerationStructureInstance) == 64);
+static_assert(sizeof(MTLIndirectAccelerationStructureInstanceDescriptor) == 72);
+// Vulkan's instance flags (VkGeometryInstanceFlagBitsKHR: cull disable, flip facing, force opaque, force no opaque) are the same bits
+// as MTLAccelerationStructureInstanceOptions' first four
+static_assert(MTLAccelerationStructureInstanceOptionDisableTriangleCulling == 1 &&
+              MTLAccelerationStructureInstanceOptionTriangleFrontFacingWindingCounterClockwise == 2 &&
+              MTLAccelerationStructureInstanceOptionOpaque == 4 && MTLAccelerationStructureInstanceOptionNonOpaque == 8);
+
+// A descriptor for a build or a size query (the caller releases it); instances: the converted records' range (zero for a size query)
+MTL4AccelerationStructureDescriptor* metal_descriptor(const AccelerationStructureDesc& desc, MTL4BufferRange instances)
+{
+    MTL4AccelerationStructureDescriptor* result = nil;
+    if (desc.type == AccelerationStructureType::bottom_level)
+    {
+        MTL4AccelerationStructureBoundingBoxGeometryDescriptor* boxes = [MTL4AccelerationStructureBoundingBoxGeometryDescriptor new];
+        boxes.boundingBoxBuffer = MTL4BufferRange(reinterpret_cast<uintptr>(desc.aabbs.aabbs.gpu), desc.aabbs.aabbs.size);
+        boxes.boundingBoxStride = desc.aabbs.stride;
+        boxes.boundingBoxCount = desc.aabbs.count;
+        boxes.opaque = desc.aabbs.opaque;
+        MTL4PrimitiveAccelerationStructureDescriptor* primitive = [MTL4PrimitiveAccelerationStructureDescriptor new];
+        primitive.geometryDescriptors = @[boxes];
+        [boxes release];
+        result = primitive;
+    }
+    else
+    {
+        MTL4InstanceAccelerationStructureDescriptor* top = [MTL4InstanceAccelerationStructureDescriptor new];
+        top.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeIndirect;
+        top.instanceDescriptorStride = sizeof(MTLIndirectAccelerationStructureInstanceDescriptor);
+        top.instanceCount = desc.instance_count;
+        top.instanceDescriptorBuffer = instances;
+        top.instanceTransformationMatrixLayout = MTLMatrixLayoutRowMajor;
+        result = top;
+    }
+    result.usage = desc.fast_build ? MTLAccelerationStructureUsagePreferFastBuild : MTLAccelerationStructureUsageNone;
+    return result;
 }
 
-AccelerationStructure* create_acceleration_structure(Device*, AccelerationStructureType, uint64) noexcept
+}
+
+AccelerationStructureSizes get_acceleration_structure_sizes(Device* device, const AccelerationStructureDesc& desc) noexcept
 {
-    report_error("acceleration structure (ray queries are not supported on Metal yet: DeviceCaps::ray_query is false)", nil);
-    return nullptr;
+    @autoreleasepool
+    {
+        if (!device->caps.ray_query)
+        {
+            report_error("acceleration structure sizes (this device has no ray tracing: DeviceCaps::ray_query is false)", nil);
+            return {};
+        }
+        MTL4AccelerationStructureDescriptor* descriptor = metal_descriptor(desc, MTL4BufferRange());
+        const MTLAccelerationStructureSizes sizes = [device->metal accelerationStructureSizesWithDescriptor:descriptor];
+        [descriptor release];
+        // Metal states no alignment for the scratch range; 256 bytes covers every buffer offset rule on Apple GPUs (not verified)
+        return {.storage = sizes.accelerationStructureSize, .scratch = sizes.buildScratchBufferSize, .scratch_alignment = 256};
+    }
+}
+
+AccelerationStructure* create_acceleration_structure(Device* device, AccelerationStructureType type, uint64 size) noexcept
+{
+    @autoreleasepool
+    {
+        if (!device->caps.ray_query)
+        {
+            report_error("acceleration structure (this device has no ray tracing: DeviceCaps::ray_query is false)", nil);
+            return nullptr;
+        }
+        id<MTLAccelerationStructure> structure = [device->metal newAccelerationStructureWithSize:size];
+        if (!structure)
+        {
+            report_error("acceleration structure", nil);
+            return nullptr;
+        }
+        add_resident(device, structure);
+        return new AccelerationStructure{.device = device, .structure = structure, .type = type};
+    }
 }
 
 void destroy_acceleration_structure(AccelerationStructure* structure) noexcept
 {
-    (void)structure; // always null here: create_acceleration_structure makes none
+    @autoreleasepool
+    {
+        if (!structure) return;
+        remove_resident(structure->device, structure->structure);
+        [structure->structure release];
+        delete structure;
+    }
 }
 
-uint64 get_acceleration_structure_address(const AccelerationStructure*) noexcept
+uint64 get_acceleration_structure_address(const AccelerationStructure* structure) noexcept
 {
-    return 0;
+    return structure ? structure->structure.gpuResourceID._impl : 0;
 }
 
-void build_acceleration_structure(CommandBuffer*, AccelerationStructure*, const AccelerationStructureDesc&, GpuRange) noexcept
+void build_acceleration_structure(CommandBuffer* commands, AccelerationStructure* destination, const AccelerationStructureDesc& desc,
+                                  GpuRange scratch) noexcept
 {
-    report_error("acceleration structure build (ray queries are not supported on Metal yet: DeviceCaps::ray_query is false)", nil);
+    @autoreleasepool
+    {
+        if (!commands || !destination || !commands->device->caps.ray_query)
+        {
+            report_error("acceleration structure build (no structure, or no ray tracing: DeviceCaps::ray_query is false)", nil);
+            return;
+        }
+        assert(commands->recording && !commands->render && destination->type == desc.type);
+        Device* device = commands->device;
+        MTL4BufferRange instances = {};
+        if (desc.type == AccelerationStructureType::top_level && desc.instance_count)
+        {
+            // The caller's records, read now: they must be in CPU-visible memory written before this call
+            uint64 offset = 0;
+            id<MTLBuffer> source = reinterpret_cast<id<MTLBuffer>>(device->buffer_map.resolve(desc.instances, &offset));
+            if (!source || source.storageMode == MTLStorageModePrivate)
+            {
+                report_error("top-level build (on Metal its instances are read at record time: they must be in CPU-visible memory)", nil);
+                return;
+            }
+            const auto* records = reinterpret_cast<const AccelerationStructureInstance*>(static_cast<const byte*>(source.contents) + offset);
+            const uint64 bytes = uint64(desc.instance_count) * sizeof(MTLIndirectAccelerationStructureInstanceDescriptor);
+            id<MTLBuffer> upload = [device->metal newBufferWithLength:bytes
+                                                           options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
+            if (!upload)
+            {
+                report_error("top-level build's instance buffer", nil);
+                return;
+            }
+            auto* converted = static_cast<MTLIndirectAccelerationStructureInstanceDescriptor*>(upload.contents);
+            for (uint32 i = 0; i < desc.instance_count; ++i)
+            {
+                const AccelerationStructureInstance& record = records[i];
+                MTLIndirectAccelerationStructureInstanceDescriptor& out = converted[i];
+                memcpy(&out.transformationMatrix, record.transform, sizeof(record.transform)); // 12 floats, rows (row-major layout)
+                out.options = static_cast<MTLAccelerationStructureInstanceOptions>(record.offset_and_flags >> 24);
+                out.mask = record.custom_index_and_mask >> 24;
+                out.intersectionFunctionTableOffset = record.offset_and_flags & 0xFFFFFFu;
+                out.userID = record.custom_index_and_mask & 0xFFFFFFu;
+                out.accelerationStructureID = MTLResourceID{._impl = record.acceleration_structure};
+            }
+            add_resident(device, upload);
+            if (commands->instance_upload_count == commands->instance_upload_capacity)
+            {
+                const uint32 capacity = commands->instance_upload_capacity ? commands->instance_upload_capacity * 2 : 4;
+                id<MTLBuffer>* grown = new id<MTLBuffer>[capacity];
+                for (uint32 i = 0; i < commands->instance_upload_count; ++i) grown[i] = commands->instance_uploads[i];
+                delete[] commands->instance_uploads;
+                commands->instance_uploads = grown;
+                commands->instance_upload_capacity = capacity;
+            }
+            commands->instance_uploads[commands->instance_upload_count++] = upload;
+            instances = MTL4BufferRange(upload.gpuAddress, bytes);
+        }
+        MTL4AccelerationStructureDescriptor* descriptor = metal_descriptor(desc, instances);
+        [compute_encoder(commands) buildAccelerationStructure:destination->structure descriptor:descriptor
+                                                scratchBuffer:MTL4BufferRange(reinterpret_cast<uintptr>(scratch.gpu), scratch.size)];
+        [descriptor release];
+    }
 }
 
 } // namespace gpu
