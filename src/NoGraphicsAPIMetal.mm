@@ -1988,4 +1988,39 @@ void draw_meshlets_indirect(CommandBuffer* commands, const void* root, GpuRange 
     }
 }
 
+// Ray tracing: not on Metal yet (DeviceCaps::ray_query is false). Metal 4 has acceleration structures (MTL4AccelerationStructure
+// descriptors, bounding-box geometry) and intersection queries in compute; Slang's Metal output does not lower RayQuery with
+// procedural candidates yet. These keep the API linkable; callers check the capability first.
+struct AccelerationStructure
+{
+};
+
+AccelerationStructureSizes get_acceleration_structure_sizes(Device*, const AccelerationStructureDesc&) noexcept
+{
+    assert(false && "ray queries are not supported on Metal yet");
+    return {};
+}
+
+AccelerationStructure* create_acceleration_structure(Device*, AccelerationStructureType, uint64) noexcept
+{
+    assert(false && "ray queries are not supported on Metal yet");
+    return nullptr;
+}
+
+void destroy_acceleration_structure(AccelerationStructure* structure) noexcept
+{
+    assert(!structure);
+    (void)structure;
+}
+
+uint64 get_acceleration_structure_address(const AccelerationStructure*) noexcept
+{
+    return 0;
+}
+
+void build_acceleration_structure(CommandBuffer*, AccelerationStructure*, const AccelerationStructureDesc&, GpuRange) noexcept
+{
+    assert(false && "ray queries are not supported on Metal yet");
+}
+
 } // namespace gpu

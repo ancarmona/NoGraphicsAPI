@@ -29,6 +29,7 @@ struct GpuHeapOwner;
 struct TextureHeapOwner;
 struct TextureDescriptorHeap;
 struct SamplerDescriptorHeap;
+struct AccelerationStructure;
 
 enum class Error : uint8
 {
@@ -409,6 +410,7 @@ enum class Stage : uint64
     transfer = 1ull << 9u,
     host = 1ull << 10u, // Barrier destination only, paired with host_read.
     all_commands = 1ull << 11u, // All GPU command stages; excludes host.
+    acceleration_structure_build = 1ull << 12u, // build_acceleration_structure (DeviceCaps::ray_query).
 };
 
 constexpr Stage operator|(Stage lhs, Stage rhs) noexcept
@@ -431,6 +433,10 @@ enum class Access : uint64
     index_read = 1ull << 9u,
     host_read = 1ull << 10u,
     descriptor_read = 1ull << 11u,
+    // Acceleration structures (DeviceCaps::ray_query): a build writes the structure and reads others (a top level reads its bottom
+    // levels); ray queries in shaders read it.
+    acceleration_structure_read = 1ull << 12u,
+    acceleration_structure_write = 1ull << 13u,
 };
 
 constexpr Access operator|(Access lhs, Access rhs) noexcept
@@ -464,6 +470,9 @@ struct DeviceCaps
     uint32 max_multiview_view_count = 0; // Views in RenderingDesc::view_mask; zero when multiview rendering is unavailable.
     uint32 max_mesh_multiview_view_count = 0; // Views in MeshPSODesc::view_mask; zero when mesh PSOs cannot use multiview.
     float max_sampler_anisotropy = 1.0f; // The largest SamplerDesc::max_anisotropy that takes effect.
+    // Acceleration structures and inline ray queries in every shader stage (Vulkan: VK_KHR_acceleration_structure, VK_KHR_ray_query).
+    // False on Metal for now, and on Vulkan devices without the extensions.
+    bool ray_query = false;
 };
 
 enum class ColorSpace : uint32 { srgb, extended_srgb_linear };
@@ -928,5 +937,63 @@ void dispatch_indirect(CommandBuffer* commands, const void* root, GpuRange argum
 void draw_meshlets(CommandBuffer* commands, const void* root, uint32x3 group_count) noexcept;
 // Requires DeviceCaps::indirect_mesh_draw. Direct task/mesh draws remain available on every supported device.
 void draw_meshlets_indirect(CommandBuffer* commands, const void* root, GpuRange arguments, uint32 draw_count = 1, uint32 stride = 0) noexcept;
+
+// Ray tracing: acceleration structures for inline ray queries (DeviceCaps::ray_query; Vulkan only for now).
+// The structure lives in storage of its own, made by create_acceleration_structure; the shader receives its 64-bit address
+// (get_acceleration_structure_address) in its root data, like any GPU pointer, and makes the handle from it
+// (Slang: RaytracingAccelerationStructure(address); SPIR-V OpConvertUToAccelerationStructureKHR).
+// Build inputs and scratch are ordinary GPU heap memory: the heaps of a ray_query device can hold them.
+enum class AccelerationStructureType : uint8
+{
+    bottom_level,
+    top_level,
+};
+
+// Bottom level: axis-aligned boxes, six floats each (min x, y, z, max x, y, z) every stride bytes (8-byte aligned).
+// A ray query sees each box as a procedural primitive candidate; its index is CandidatePrimitiveIndex().
+struct AccelerationStructureAabbs
+{
+    GpuRange aabbs = {};
+    uint32 count = 0;
+    uint32 stride = 24;
+    bool opaque = true; // Opaque boxes skip the any-hit-like candidate step of non-opaque ones (the shader still decides the hit).
+};
+
+// Top level instance, VkAccelerationStructureInstanceKHR's layout (64 bytes): a row-major 3x4 object-to-world transform,
+// a 24-bit custom index (InstanceID()) and an 8-bit mask tested against the ray query's mask, a 24-bit hit group offset and
+// 8 flags (unused by ray queries: zero), and the bottom level's address.
+struct AccelerationStructureInstance
+{
+    float transform[3][4] = {{1.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 0.0f}};
+    uint32 custom_index_and_mask = 0xFF000000u; // index | mask << 24
+    uint32 offset_and_flags = 0;
+    uint64 acceleration_structure = 0;
+};
+
+struct AccelerationStructureDesc
+{
+    AccelerationStructureType type = AccelerationStructureType::bottom_level;
+    AccelerationStructureAabbs aabbs = {}; // bottom_level
+    GpuRange instances = {};               // top_level: AccelerationStructureInstance records, 16-byte aligned
+    uint32 instance_count = 0;
+    bool fast_build = false;               // Prefer build speed over trace speed (a structure rebuilt every frame).
+};
+
+struct AccelerationStructureSizes
+{
+    uint64 storage = 0; // create_acceleration_structure's size
+    uint64 scratch = 0; // build_acceleration_structure's scratch, GPU heap memory (gpu_only), aligned to scratch_alignment
+    uint64 scratch_alignment = 0;
+};
+
+// The sizes for a build with these counts (the GPU ranges may be empty): a structure sized for a count builds any smaller count.
+[[nodiscard]] AccelerationStructureSizes get_acceleration_structure_sizes(Device* device, const AccelerationStructureDesc& desc) noexcept;
+[[nodiscard]] AccelerationStructure* create_acceleration_structure(Device* device, AccelerationStructureType type, uint64 size) noexcept;
+void destroy_acceleration_structure(AccelerationStructure* structure) noexcept;
+[[nodiscard]] uint64 get_acceleration_structure_address(const AccelerationStructure* structure) noexcept;
+// Records a full build outside render passes. Inputs and scratch must be written before (barrier to acceleration_structure_build);
+// a ray query reads the result after a barrier from acceleration_structure_build / acceleration_structure_write.
+void build_acceleration_structure(CommandBuffer* commands, AccelerationStructure* destination, const AccelerationStructureDesc& desc,
+                                  GpuRange scratch) noexcept;
 
 } // namespace gpu

@@ -371,3 +371,15 @@ of direct matches, Vulkan adaptations, and intentionally unsupported areas.
 [mesh-shader]: https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_mesh_shader.html
 [swapchain-maintenance]: https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_swapchain_maintenance1.html
 [spirv-heap]: https://github.khronos.org/SPIRV-Registry/extensions/EXT/SPV_EXT_descriptor_heap.html
+
+## Acceleration structures and ray queries
+
+`DeviceCaps::ray_query` is true when `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`, `VK_KHR_deferred_host_operations` and
+`shaderInt64` are available; the library then enables them. A structure owns its storage (`create_acceleration_structure`); build
+inputs (boxes, instances) and scratch are ordinary GPU heap memory addressed by GPU pointers, so a ray-query device creates its heaps with
+`ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY` and `STORAGE_BUFFER` usage and passes `VK_ADDRESS_COMMAND_STORAGE_BUFFER_USAGE_BIT_KHR`
+in its address commands. Bottom levels hold axis-aligned boxes (procedural candidates); top levels hold
+`AccelerationStructureInstance` records. Shaders receive `get_acceleration_structure_address` in their root and convert it
+(Slang: `RaytracingAccelerationStructure(address)`, SPIR-V `OpConvertUToAccelerationStructureKHR`), then use inline `RayQuery`.
+Builds are full device builds (no update or compaction yet); barrier with `Stage::acceleration_structure_build` and
+`Access::acceleration_structure_read`/`write`. Metal: not yet (`ray_query` is false; the functions are stubs).
