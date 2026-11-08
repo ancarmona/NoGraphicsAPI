@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 namespace
 {
@@ -344,6 +345,26 @@ bool test_independent_pool_timestamps(gpu::Device* device)
     return valid;
 }
 
+// The calibrated pair's host time is CLOCK_MONOTONIC_RAW: a thousand samples, each within a second of a read of that clock (the
+// offset to the Mach uptime clock once wrapped to about 2^63 when the two clocks were equal: a machine not asleep since boot)
+bool test_calibrated_timestamps(gpu::Device* device) noexcept
+{
+    uint32 far = 0;
+    int64 worst = 0;
+    for (uint32 i = 0; i < 1000; ++i)
+    {
+        gpu::CalibratedTimestamps pair{};
+        if (!gpu::get_calibrated_timestamps(device, pair) || pair.host_domain != gpu::HostTimeDomain::clock_monotonic_raw) return false;
+        const int64 difference = static_cast<int64>(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - pair.host);
+        const int64 magnitude = difference < 0 ? -difference : difference;
+        if (magnitude > worst) worst = magnitude;
+        if (magnitude > 1000000000) ++far;
+    }
+    printf("Calibrated timestamps: 1000 samples, the host time at most %lld ns from CLOCK_MONOTONIC_RAW, %u far: %s\n",
+           static_cast<long long>(worst), far, far ? "failed" : "passed");
+    return far == 0;
+}
+
 }
 
 int main()
@@ -355,7 +376,7 @@ int main()
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(initialized.device);
     const bool valid = test_heaps_and_roots(initialized.device, timeline) && test_draws(initialized.device, timeline) &&
                        test_viewports_and_culling(initialized.device, timeline) &&
-                       test_independent_pool_timestamps(initialized.device);
+                       test_independent_pool_timestamps(initialized.device) && test_calibrated_timestamps(initialized.device);
     gpu::wait_idle(initialized.device);
     gpu::destroy_timeline_semaphore(timeline);
     gpu::destroy_device(initialized.device);
