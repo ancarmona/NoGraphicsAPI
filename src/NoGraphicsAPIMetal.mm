@@ -1997,22 +1997,22 @@ struct AccelerationStructure
 {
 };
 
+// Called anyway: an error and an empty result in every build (no assert-only check)
 AccelerationStructureSizes get_acceleration_structure_sizes(Device*, const AccelerationStructureDesc&) noexcept
 {
-    assert(false && "ray queries are not supported on Metal yet");
+    report_error("acceleration structure sizes (ray queries are not supported on Metal yet: DeviceCaps::ray_query is false)", nil);
     return {};
 }
 
 AccelerationStructure* create_acceleration_structure(Device*, AccelerationStructureType, uint64) noexcept
 {
-    assert(false && "ray queries are not supported on Metal yet");
+    report_error("acceleration structure (ray queries are not supported on Metal yet: DeviceCaps::ray_query is false)", nil);
     return nullptr;
 }
 
 void destroy_acceleration_structure(AccelerationStructure* structure) noexcept
 {
-    assert(!structure);
-    (void)structure;
+    (void)structure; // always null here: create_acceleration_structure makes none
 }
 
 uint64 get_acceleration_structure_address(const AccelerationStructure*) noexcept
@@ -2022,7 +2022,7 @@ uint64 get_acceleration_structure_address(const AccelerationStructure*) noexcept
 
 void build_acceleration_structure(CommandBuffer*, AccelerationStructure*, const AccelerationStructureDesc&, GpuRange) noexcept
 {
-    assert(false && "ray queries are not supported on Metal yet");
+    report_error("acceleration structure build (ray queries are not supported on Metal yet: DeviceCaps::ray_query is false)", nil);
 }
 
 } // namespace gpu

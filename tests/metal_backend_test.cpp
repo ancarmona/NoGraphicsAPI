@@ -365,6 +365,28 @@ bool test_calibrated_timestamps(gpu::Device* device) noexcept
     return far == 0;
 }
 
+uint32 stub_errors = 0;
+
+void count_stub_error(const char*, bool) noexcept { ++stub_errors; }
+
+// Ray queries are not on Metal yet: the capability is false, and every call fails with an error and an empty result in every build
+bool test_ray_query_stubs(gpu::Device* device) noexcept
+{
+    const bool capability = gpu::get_device_caps(device).ray_query;
+    gpu::set_error_callback(count_stub_error);
+    const gpu::AccelerationStructureDesc desc{.type = gpu::AccelerationStructureType::bottom_level};
+    const gpu::AccelerationStructureSizes sizes = gpu::get_acceleration_structure_sizes(device, desc);
+    gpu::AccelerationStructure* structure = gpu::create_acceleration_structure(device, gpu::AccelerationStructureType::bottom_level, 4096);
+    gpu::build_acceleration_structure(nullptr, structure, desc, {}); // the stub records nothing
+    const uint64 address = gpu::get_acceleration_structure_address(structure);
+    gpu::destroy_acceleration_structure(structure);
+    gpu::set_error_callback(nullptr);
+    const bool valid = !capability && !sizes.storage && !sizes.scratch && !structure && !address && stub_errors == 3;
+    printf("Ray query stubs: ray_query %s, %u errors, empty results: %s\n", capability ? "true" : "false", stub_errors,
+           valid ? "passed" : "failed");
+    return valid;
+}
+
 }
 
 int main()
@@ -376,7 +398,8 @@ int main()
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(initialized.device);
     const bool valid = test_heaps_and_roots(initialized.device, timeline) && test_draws(initialized.device, timeline) &&
                        test_viewports_and_culling(initialized.device, timeline) &&
-                       test_independent_pool_timestamps(initialized.device) && test_calibrated_timestamps(initialized.device);
+                       test_independent_pool_timestamps(initialized.device) && test_calibrated_timestamps(initialized.device) &&
+                       test_ray_query_stubs(initialized.device);
     gpu::wait_idle(initialized.device);
     gpu::destroy_timeline_semaphore(timeline);
     gpu::destroy_device(initialized.device);
