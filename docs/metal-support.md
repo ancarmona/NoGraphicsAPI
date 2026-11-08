@@ -31,8 +31,8 @@ Metal 4 also accepts GPU addresses in its command API:
 
 Despite the `Buffer` names, these Metal 4 arguments are addresses, not `MTLBuffer` objects. The backend
 passes them through directly. Copy commands resolve GPU ranges to backing buffers and offsets.
-The shared address table supports at most 64 live GPU heaps per device;
-each command range must fit in one heap. Lookup uses binary search and atomic version checks without mutexes.
+The shared address table supports at most 64 live GPU heaps per device; past it, `create_gpu_heap` reports an
+error and returns an empty heap (every build), until a heap is destroyed. Each command range must fit in one heap. Lookup uses binary search and atomic version checks without mutexes.
 Table and residency-set updates are serialized; ordinary command recording and submission are not.
 
 ## Application-owned descriptor heaps

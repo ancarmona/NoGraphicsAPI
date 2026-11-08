@@ -438,12 +438,49 @@ bool test_descriptors(gpu::Device* device) noexcept
     printf("Shared placement heap and disjoint descriptor updates with GPU readback: %s\n", valid ? "passed" : "failed");
     return valid;
 }
+
+uint32 limit_errors = 0;
+char limit_message[512] = {};
+
+void record_limit_error(const char* message, bool) noexcept
+{
+    ++limit_errors;
+    snprintf(limit_message, sizeof(limit_message), "%s", message);
+}
+
+// The address map holds 64 live GPU heaps: the 65th is refused with an error and an empty heap, in every build; a freed slot is
+// used again
+bool test_limit(gpu::Device* device) noexcept
+{
+    gpu::set_error_callback(record_limit_error);
+    gpu::GpuHeap heaps[65]{};
+    uint32 created = 0;
+    while (created < 65)
+    {
+        heaps[created] = gpu::create_gpu_heap(device, 256);
+        if (!heaps[created].range.gpu) break;
+        ++created;
+    }
+    const uint32 errors_at_limit = limit_errors;
+    const gpu::GpuHeap refused = gpu::create_gpu_heap(device, 256, gpu::MemoryType::gpu_only);
+    bool valid = created == 64 && errors_at_limit == 1 && !refused.range.gpu && !refused.range.cpu && limit_errors == 2 &&
+                 strstr(limit_message, "64 live GPU heaps");
+    gpu::destroy_gpu_heap(heaps[10]);
+    heaps[10] = gpu::create_gpu_heap(device, 256);
+    valid = valid && heaps[10].range.gpu && limit_errors == 2;
+    gpu::set_error_callback(nullptr);
+    printf("Limit: %u live heaps, the 65th refused (%u errors: \"%s\"), a freed slot used again: %s\n", created, limit_errors,
+           limit_message, valid ? "passed" : "failed");
+    for (uint32 i = 0; i < created; ++i) gpu::destroy_gpu_heap(heaps[i]);
+    return valid;
+}
 }
 
 int main(int argc, char** argv)
 {
     const char* mode = argc == 2 ? argv[1] : "all";
-    if (strcmp(mode, "all") && strcmp(mode, "registry") && strcmp(mode, "timestamps") && strcmp(mode, "descriptors")) return 1;
+    if (strcmp(mode, "all") && strcmp(mode, "registry") && strcmp(mode, "timestamps") && strcmp(mode, "descriptors") && strcmp(mode, "limit"))
+        return 1;
     const gpu::DeviceInit initialized = gpu::create_device({.desired_queue_count = worker_count, .timestamp_query_count = timestamp_queries});
     if (initialized.error == gpu::Error::unsupported) return 77;
     if (initialized.error != gpu::Error::none) return 1;
@@ -458,6 +495,7 @@ int main(int argc, char** argv)
     if (!strcmp(mode, "all") || !strcmp(mode, "registry")) valid = test_registry(device) && valid;
     if (!strcmp(mode, "all") || !strcmp(mode, "timestamps")) valid = test_timestamps(device) && valid;
     if (!strcmp(mode, "all") || !strcmp(mode, "descriptors")) valid = test_descriptors(device) && valid;
+    if (!strcmp(mode, "all") || !strcmp(mode, "limit")) valid = test_limit(device) && valid;
     gpu::wait_idle(device);
     gpu::destroy_device(device);
     return valid ? 0 : 1;

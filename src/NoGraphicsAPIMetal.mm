@@ -322,6 +322,7 @@ struct Device
     char name[256] = {};
     os_unfair_lock residency_lock = OS_UNFAIR_LOCK_INIT;
     detail::BufferAddressMap buffer_map = {};
+    uint32 live_gpu_heaps = 0; // reserved before buffer_map.insert: the map holds a fixed number of records
     CounterPage* counter_pages = nullptr;
     uint32 counter_page_count = 0;
     uint32 timestamp_query_count = 0;
@@ -810,11 +811,25 @@ GpuHeap create_gpu_heap(Device* device, uint64 byte_count, MemoryType memory) no
 {
     @autoreleasepool
     {
+        // The address map has a fixed number of records: past it, an error and an empty heap in every build
+        constexpr uint32 max_live_gpu_heaps = sizeof(detail::BufferAddressMap::records) / sizeof(detail::BufferRecord);
+        static_assert(max_live_gpu_heaps == 64, "the error message names the limit");
+        if (__atomic_add_fetch(&device->live_gpu_heaps, 1, __ATOMIC_ACQ_REL) > max_live_gpu_heaps)
+        {
+            __atomic_sub_fetch(&device->live_gpu_heaps, 1, __ATOMIC_ACQ_REL);
+            report_error("GPU heap (the device already has 64 live GPU heaps, the address map's limit)", nil);
+            return {};
+        }
         MTLResourceOptions options = memory == MemoryType::gpu_only ? MTLResourceStorageModePrivate : MTLResourceStorageModeShared;
         if (memory == MemoryType::cpu_visible) options |= MTLResourceCPUCacheModeWriteCombined;
         options |= MTLResourceHazardTrackingModeUntracked;
         const MTLSizeAndAlign requirements = [device->metal heapBufferSizeAndAlignWithLength:byte_count options:options];
-        if (!requirements.size || !requirements.align) { report_error("GPU heap memory requirements", nil); return {}; }
+        if (!requirements.size || !requirements.align)
+        {
+            __atomic_sub_fetch(&device->live_gpu_heaps, 1, __ATOMIC_ACQ_REL);
+            report_error("GPU heap memory requirements", nil);
+            return {};
+        }
         MTLHeapDescriptor* desc = [MTLHeapDescriptor new];
         desc.type = MTLHeapTypePlacement;
         desc.size = align_up(requirements.size, requirements.align);
@@ -824,6 +839,7 @@ GpuHeap create_gpu_heap(Device* device, uint64 byte_count, MemoryType memory) no
         owner->buffer = [owner->heap newBufferWithLength:byte_count options:options offset:0];
         if (!owner->buffer)
         {
+            __atomic_sub_fetch(&device->live_gpu_heaps, 1, __ATOMIC_ACQ_REL);
             report_error("GPU heap", nil);
             [owner->heap release];
             delete owner;
@@ -844,6 +860,7 @@ void destroy_gpu_heap(const GpuHeap& heap) noexcept
         if (!heap.owner) return;
         GpuHeapOwner* owner = const_cast<GpuHeapOwner*>(heap.owner);
         owner->device->buffer_map.remove(owner->record);
+        __atomic_sub_fetch(&owner->device->live_gpu_heaps, 1, __ATOMIC_ACQ_REL);
         remove_resident(owner->device, owner->device->shader_validation ? (id<MTLAllocation>)owner->buffer : (id<MTLAllocation>)owner->heap);
         [owner->buffer release];
         [owner->heap release];

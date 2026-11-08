@@ -183,7 +183,9 @@ if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_test(NAME test_metal_address_registry COMMAND test_metal_resource_concurrency registry)
     add_test(NAME test_metal_timestamp_concurrency COMMAND test_metal_resource_concurrency timestamps)
     add_test(NAME test_metal_descriptor_concurrency COMMAND test_metal_resource_concurrency descriptors)
-    set_tests_properties(test_metal_address_registry test_metal_timestamp_concurrency test_metal_descriptor_concurrency PROPERTIES
+    add_test(NAME test_metal_heap_limit COMMAND test_metal_resource_concurrency limit)
+    set_tests_properties(test_metal_address_registry test_metal_timestamp_concurrency test_metal_descriptor_concurrency
+        test_metal_heap_limit PROPERTIES
         SKIP_RETURN_CODE 77 TIMEOUT 180 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:"
         ENVIRONMENT "MTL_DEBUG_LAYER=1")
 endif()
