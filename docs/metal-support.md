@@ -105,6 +105,8 @@ Use three drawables to keep scanout from starving a two-frame renderer on Apple 
   64-byte `AccelerationStructureInstance` (Vulkan's layout). `build_acceleration_structure` converts them **at record time** from
   CPU-visible memory into a buffer that the command buffer keeps until it is reset. The transform is copied as is: the layout is set
   row-major. The custom index becomes the user ID, and the flags keep their bit values.
+  **Limitation**: instances written by the GPU (in `gpu_only` memory, or by a shader in the same command buffer) are not supported:
+  the build reports an error. Supporting them would need a conversion kernel run on the GPU before the build (not done).
 - `get_acceleration_structure_address` returns the structure's `MTLResourceID`. In a shader, `gpu_acceleration_structure_from_id`
   (`shader.slang`) makes the handle from it, as `gpu_texture_from_id` does for textures. Slang has no
   `RaytracingAccelerationStructure(address)` for Metal.

@@ -942,7 +942,8 @@ void draw_meshlets_indirect(CommandBuffer* commands, const void* root, GpuRange 
 // The structure lives in storage of its own, made by create_acceleration_structure; the shader receives its 64-bit address
 // (get_acceleration_structure_address: Vulkan's device address, Metal's MTLResourceID) in its root data, like any GPU pointer, and
 // makes the handle from it (shader.slang: gpu_acceleration_structure_from_id; SPIR-V OpConvertUToAccelerationStructureKHR).
-// Metal reads a top level's instances at record time (build_acceleration_structure): put them in CPU-visible memory.
+// Metal reads a top level's instances at record time (build_acceleration_structure): put them in CPU-visible memory, written by the
+// CPU before the call (GPU-written instances would need a conversion kernel on Metal: not done).
 // Build inputs and scratch are ordinary GPU heap memory: the heaps of a ray_query device can hold them.
 enum class AccelerationStructureType : uint8
 {
