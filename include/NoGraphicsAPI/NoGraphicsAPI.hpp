@@ -807,10 +807,13 @@ void destroy_texture_heap(const TextureHeap& heap) noexcept;
 // Creates an uninitialized texture without recording GPU commands. Views and descriptors can be created before initialize_texture().
 [[nodiscard]] Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHeap& heap, uint64 offset) noexcept;
 void destroy_texture(Texture* texture) noexcept;
-// Vulkan only: wraps an image made by someone else (a VkImage, such as an OpenXR swapchain image) without taking it: destroy_texture
-// leaves the image. desc describes the image as it was made (type, extent, layers, format, samples, mutable_format, usage). The
-// library keeps every texture in one layout; begin_external_access moves the image into it before its first use in a command
-// buffer, and end_external_access hands it back in the layout an OpenXR runtime expects.
+// Wraps an image made by someone else without taking it: destroy_texture leaves the image. desc describes the image as it was made
+// (type, extent, layers, format, samples, mutable_format, usage). Vulkan: a VkImage (an OpenXR swapchain image); the library keeps
+// every texture in one layout, begin_external_access moves the image into it before its first use in a command buffer and
+// end_external_access hands it back in the layout an OpenXR runtime expects. Metal: an id<MTLTexture> of the device's own MTLDevice
+// (another library's render target on the system's default device), retained and made resident until destroy_texture; its pixel
+// format and extent must match desc; the access calls do nothing. Ordering with the other library's queue is the caller's (no
+// shared event: wait for its work before recording a use, and let it write again only after the use completed).
 [[nodiscard]] Texture* create_external_texture(Device* device, const TextureDesc& desc, void* native_image) noexcept;
 [[nodiscard]] RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc = {}) noexcept;
 void destroy_render_view(RenderView* render_view) noexcept;

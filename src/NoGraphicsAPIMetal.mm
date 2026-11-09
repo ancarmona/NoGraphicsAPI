@@ -183,6 +183,7 @@ struct Texture
     Device* device = nullptr;
     id<MTLTexture> texture = nil;
     TextureDesc desc = {};
+    bool external = false; // create_external_texture: retained and resident here, made by someone else
 };
 
 struct RenderView
@@ -971,7 +972,7 @@ void destroy_texture(Texture* texture) noexcept
     @autoreleasepool
     {
         if (!texture) return;
-        if (texture->device->shader_validation) remove_resident(texture->device, texture->texture);
+        if (texture->device->shader_validation || texture->external) remove_resident(texture->device, texture->texture);
         [texture->texture release];
         delete texture;
     }
@@ -984,11 +985,23 @@ void initialize_texture(CommandBuffer* commands, Texture* texture) noexcept
     (void)texture;
 }
 
-// External images (OpenXR's Vulkan swapchains) are a Vulkan feature
-Texture* create_external_texture(Device*, const TextureDesc&, void*) noexcept
+// Another library's texture on this MTLDevice (a UI layer rendered by its own queue): retained and resident while wrapped
+Texture* create_external_texture(Device* device, const TextureDesc& desc, void* native_image) noexcept
 {
-    report_error("external textures are unsupported", nil);
-    return nullptr;
+    @autoreleasepool
+    {
+        id<MTLTexture> texture = (id<MTLTexture>)native_image;
+        if (!device || !texture) { report_error("external texture: no texture", nil); return nullptr; }
+        if (texture.device != device->metal) { report_error("external texture: made on another MTLDevice", nil); return nullptr; }
+        if (texture.pixelFormat != pixel_format(desc.format) || texture.width != desc.extent.x || texture.height != desc.extent.y)
+        {
+            report_error("external texture: its pixel format or extent differs from desc", nil);
+            return nullptr;
+        }
+        [texture retain];
+        add_resident(device, texture);
+        return new Texture{.device = device, .texture = texture, .desc = desc, .external = true};
+    }
 }
 
 void begin_external_access(CommandBuffer*, Texture*) noexcept {}
