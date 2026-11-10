@@ -19,6 +19,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <wchar.h>
+#endif
 
 // Keep assert expressions type-checked in release without evaluating them.
 #if defined(NDEBUG)
@@ -529,6 +532,9 @@ struct DeviceFunctions
     PFN_vkDestroyAccelerationStructureKHR destroy_acceleration_structure = nullptr;
     PFN_vkGetAccelerationStructureDeviceAddressKHR get_acceleration_structure_address = nullptr;
     PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_acceleration_structures = nullptr;
+    // NGA_PIPELINE_STATISTICS=1 (Vulkan, debug): VK_KHR_pipeline_executable_properties
+    PFN_vkGetPipelineExecutablePropertiesKHR get_pipeline_executable_properties = nullptr;
+    PFN_vkGetPipelineExecutableStatisticsKHR get_pipeline_executable_statistics = nullptr;
 };
 
 struct BackingBuffer
@@ -699,6 +705,8 @@ struct PresentContext
 
 struct Device
 {
+    // NGA_PIPELINE_STATISTICS=1: each pipeline is created with CAPTURE_STATISTICS and its executables' statistics go to stderr
+    bool pipeline_statistics = false;
     VkInstance instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
     PFN_vkDestroyDebugUtilsMessengerEXT destroy_debug_messenger = nullptr;
@@ -2096,7 +2104,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         };
         first_queue += queue_counts[type];
     }
-    const char* enabled_device_extensions[12]{};
+    const char* enabled_device_extensions[13]{};
     uint32 enabled_device_extension_count = 0;
     // Calibrated timestamps, to put GPU timestamps on the CPU clock; optional
     const char* calibrated_extension = nullptr;
@@ -2137,9 +2145,23 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
             : VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
     }
 #endif
+    // NGA_PIPELINE_STATISTICS=1: the driver's statistics per pipeline executable (registers, spills, instructions on NVIDIA)
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executable_features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
+        .pNext = &enabled_features.core,
+        .pipelineExecutableInfo = VK_TRUE,
+    };
+    {
+#if defined(_WIN32)
+        const wchar_t* value = _wgetenv(L"NGA_PIPELINE_STATISTICS");
+        state->pipeline_statistics = value && value[0] == L'1';
+#endif
+    }
+    if (state->pipeline_statistics)
+        enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
     const VkDeviceCreateInfo device_info{
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = &enabled_features.core,
+        .pNext = state->pipeline_statistics ? static_cast<const void*>(&executable_features) : static_cast<const void*>(&enabled_features.core),
         .queueCreateInfoCount = state->queue_family_count,
         .pQueueCreateInfos = queue_infos,
         .enabledExtensionCount = enabled_device_extension_count,
@@ -2201,6 +2223,14 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         }
     }
 
+    if (state->pipeline_statistics)
+    {
+        state->fn.get_pipeline_executable_properties =
+            load_device_proc<PFN_vkGetPipelineExecutablePropertiesKHR>(state->device, "vkGetPipelineExecutablePropertiesKHR");
+        state->fn.get_pipeline_executable_statistics =
+            load_device_proc<PFN_vkGetPipelineExecutableStatisticsKHR>(state->device, "vkGetPipelineExecutableStatisticsKHR");
+        state->pipeline_statistics = state->fn.get_pipeline_executable_properties && state->fn.get_pipeline_executable_statistics;
+    }
     state->fn.write_sampler_descriptors = load_device_proc<PFN_vkWriteSamplerDescriptorsEXT>(state->device, "vkWriteSamplerDescriptorsEXT");
     state->fn.write_resource_descriptors = load_device_proc<PFN_vkWriteResourceDescriptorsEXT>(state->device, "vkWriteResourceDescriptorsEXT");
     state->fn.cmd_bind_sampler_heap = load_device_proc<PFN_vkCmdBindSamplerHeapEXT>(state->device, "vkCmdBindSamplerHeapEXT");
@@ -3331,6 +3361,65 @@ struct RasterTargets
     uint32 view_mask = 0;
 };
 
+// A line on stderr (Core's log in Surfbird: no fprintf there)
+static void stat_line(const char* format, ...) noexcept __attribute__((format(printf, 1, 2)));
+static void stat_line(const char* format, ...) noexcept
+{
+    char line[512];
+    __builtin_va_list arguments;
+    __builtin_va_start(arguments, format);
+    vsnprintf(line, sizeof(line), format, arguments);
+    __builtin_va_end(arguments);
+    fputs(line, stderr);
+}
+
+// NGA_PIPELINE_STATISTICS=1: one line per executable statistic, "NGA_STAT <entry> <executable> <name> = <value>" on stderr
+static void report_pipeline_statistics(Device* device, VkPipeline pipeline, const char* entry) noexcept
+{
+    if (!device->pipeline_statistics)
+        return;
+    const VkPipelineInfoKHR info{.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, .pipeline = pipeline};
+    uint32 executable_count = 0;
+    if (device->fn.get_pipeline_executable_properties(device->device, &info, &executable_count, nullptr) != VK_SUCCESS)
+        return;
+    VkPipelineExecutablePropertiesKHR executables[8];
+    executable_count = executable_count < 8u ? executable_count : 8u;
+    for (uint32 i = 0; i < executable_count; ++i)
+        executables[i] = {.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR};
+    device->fn.get_pipeline_executable_properties(device->device, &info, &executable_count, executables);
+    for (uint32 i = 0; i < executable_count; ++i)
+    {
+        const VkPipelineExecutableInfoKHR executable{.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR, .pipeline = pipeline, .executableIndex = i};
+        VkPipelineExecutableStatisticKHR statistics[32];
+        uint32 count = 32;
+        for (uint32 k = 0; k < count; ++k)
+            statistics[k] = {.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR};
+        const VkResult result = device->fn.get_pipeline_executable_statistics(device->device, &executable, &count, statistics);
+        if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+            continue;
+        stat_line("NGA_STAT %s %s subgroup = %u\n", entry, executables[i].name, executables[i].subgroupSize);
+        for (uint32 k = 0; k < count; ++k)
+        {
+            const VkPipelineExecutableStatisticKHR& statistic = statistics[k];
+            switch (statistic.format)
+            {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+                stat_line("NGA_STAT %s %s %s = %u\n", entry, executables[i].name, statistic.name, statistic.value.b32);
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+                stat_line("NGA_STAT %s %s %s = %lld\n", entry, executables[i].name, statistic.name, static_cast<long long>(statistic.value.i64));
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+                stat_line("NGA_STAT %s %s %s = %llu\n", entry, executables[i].name, statistic.name, static_cast<unsigned long long>(statistic.value.u64));
+                break;
+            default:
+                stat_line("NGA_STAT %s %s %s = %f\n", entry, executables[i].name, statistic.name, statistic.value.f64);
+                break;
+            }
+        }
+    }
+}
+
 PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const ShaderStage& fragment, const RasterTargets& targets,
                        const RasterizationState& rasterization_state, bool mesh, const ShaderStage& task = {}) noexcept
 {
@@ -3471,7 +3560,7 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
     const VkPipelineCreateFlags2CreateInfo flags_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
         .pNext = &rendering_info,
-        .flags = VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT,
+        .flags = VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT | (device->pipeline_statistics ? VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR : 0),
     };
     const VkGraphicsPipelineCreateInfo pso_info{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -3497,6 +3586,7 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
         delete result;
         return nullptr;
     }
+    report_pipeline_statistics(device, result->pso, fragment.code.size ? fragment.entry_point : first_stage.entry_point);
     return result;
 }
 
@@ -3541,7 +3631,7 @@ PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept
     };
     const VkPipelineCreateFlags2CreateInfo flags_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
-        .flags = VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT,
+        .flags = VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT | (device->pipeline_statistics ? VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR : 0),
     };
     const VkComputePipelineCreateInfo pso_info{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -3558,6 +3648,7 @@ PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept
         delete result;
         return nullptr;
     }
+    report_pipeline_statistics(device, result->pso, compute.entry_point);
     return result;
 }
 
