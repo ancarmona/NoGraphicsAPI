@@ -450,8 +450,11 @@ VkAccessFlags2 to_vk(Access accesses)
     VkAccessFlags2 result = 0;
     if (has_flag(accesses, Access::transfer_read)) result |= VK_ACCESS_2_TRANSFER_READ_BIT;
     if (has_flag(accesses, Access::transfer_write)) result |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    // SHADER_READ too: an acceleration structure build reads its geometry inputs (AABBs, vertices, instances) as SHADER_READ at
+    // ACCELERATION_STRUCTURE_BUILD, where the storage / sampled / uniform read bits do not apply (sync validation, SDK 1.4.363)
     if (has_flag(accesses, Access::shader_read))
-        result |= VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_UNIFORM_READ_BIT;
+        result |= VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                  VK_ACCESS_2_UNIFORM_READ_BIT;
     if (has_flag(accesses, Access::shader_write)) result |= VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     if (has_flag(accesses, Access::color_read)) result |= VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
     if (has_flag(accesses, Access::color_write)) result |= VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
