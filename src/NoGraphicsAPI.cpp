@@ -2304,6 +2304,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         .integer_sample_counts = selected.vulkan12_properties.framebufferIntegerColorSampleCounts & limits.sampledImageIntegerSampleCounts & 15u,
         .depth_resolve_min_max = (selected.vulkan12_properties.supportedDepthResolveModes & (VK_RESOLVE_MODE_MIN_BIT | VK_RESOLVE_MODE_MAX_BIT)) ==
                                  (VK_RESOLVE_MODE_MIN_BIT | VK_RESOLVE_MODE_MAX_BIT),
+        .depth_resolve_multiview = true,
         .max_multiview_view_count = selected.vulkan11_properties.maxMultiviewViewCount,
         .max_mesh_multiview_view_count = selected.multiview_mesh_shader ? selected.mesh_properties.maxMeshMultiviewViewCount : 0u,
         .max_sampler_anisotropy = limits.maxSamplerAnisotropy,

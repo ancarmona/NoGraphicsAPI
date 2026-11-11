@@ -1806,6 +1806,8 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
         if (depth_resolve)
         {
             assert(desc.depth.render_view->texture.sampleCount > 1 && desc.depth.resolve_view->texture.sampleCount == 1);
+            // A layered pass resolves its first layer only (checked on an M5 Max, macOS 27): DeviceCaps::depth_resolve_multiview is false
+            assert(__builtin_popcount(desc.view_mask) <= 1);
             pass.depthAttachment.resolveLevel = desc.depth.resolve_view->mip;
             pass.depthAttachment.resolveSlice = desc.depth.resolve_view->slice;
             pass.depthAttachment.depthResolveFilter = desc.depth.resolve == DepthResolve::min ? MTLMultisampleDepthResolveFilterMin :
