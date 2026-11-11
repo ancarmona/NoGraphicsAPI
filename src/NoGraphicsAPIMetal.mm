@@ -622,6 +622,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
             .texture_compression_astc = true,
             .storage_input_output16 = true,
             .indirect_mesh_draw = [device->metal supportsFamily:MTLGPUFamilyApple9],
+            .depth_resolve_min_max = true, // Apple3 and later (Metal feature set tables)
         };
         // Apple GPUs render and sample MSAA in float, normalized and integer formats alike. Metal's default 4x positions are
         // Vulkan's standard ones (checked on an M5 Max: (0.375, 0.125), (0.875, 0.375), (0.125, 0.625), (0.625, 0.875))
@@ -1799,6 +1800,20 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
         }
         render_attachment(pass.depthAttachment, desc.depth.render_view, desc.depth.load, desc.depth.store);
         pass.depthAttachment.clearDepth = desc.depth.clear;
+        // The pass descriptor is reused: the resolve is set or cleared every time
+        const bool depth_resolve = desc.depth.render_view && desc.depth.resolve_view && desc.depth.resolve != DepthResolve::none;
+        pass.depthAttachment.resolveTexture = depth_resolve ? desc.depth.resolve_view->texture : nil;
+        if (depth_resolve)
+        {
+            assert(desc.depth.render_view->texture.sampleCount > 1 && desc.depth.resolve_view->texture.sampleCount == 1);
+            pass.depthAttachment.resolveLevel = desc.depth.resolve_view->mip;
+            pass.depthAttachment.resolveSlice = desc.depth.resolve_view->slice;
+            pass.depthAttachment.depthResolveFilter = desc.depth.resolve == DepthResolve::min ? MTLMultisampleDepthResolveFilterMin :
+                                                      desc.depth.resolve == DepthResolve::max ? MTLMultisampleDepthResolveFilterMax :
+                                                                                               MTLMultisampleDepthResolveFilterSample0;
+            pass.depthAttachment.storeAction = desc.depth.store == StoreOp::store ? MTLStoreActionStoreAndMultisampleResolve :
+                                                                                    MTLStoreActionMultisampleResolve;
+        }
         render_attachment(pass.stencilAttachment, desc.stencil.render_view, desc.stencil.load, desc.stencil.store);
         pass.stencilAttachment.clearStencil = desc.stencil.clear;
         assert(area);

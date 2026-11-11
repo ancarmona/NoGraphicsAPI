@@ -2302,6 +2302,8 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         .sample_counts = limits.framebufferColorSampleCounts & limits.framebufferDepthSampleCounts & limits.framebufferStencilSampleCounts &
                          limits.sampledImageColorSampleCounts & limits.sampledImageDepthSampleCounts & limits.sampledImageStencilSampleCounts & 15u,
         .integer_sample_counts = selected.vulkan12_properties.framebufferIntegerColorSampleCounts & limits.sampledImageIntegerSampleCounts & 15u,
+        .depth_resolve_min_max = (selected.vulkan12_properties.supportedDepthResolveModes & (VK_RESOLVE_MODE_MIN_BIT | VK_RESOLVE_MODE_MAX_BIT)) ==
+                                 (VK_RESOLVE_MODE_MIN_BIT | VK_RESOLVE_MODE_MAX_BIT),
         .max_multiview_view_count = selected.vulkan11_properties.maxMultiviewViewCount,
         .max_mesh_multiview_view_count = selected.multiview_mesh_shader ? selected.mesh_properties.maxMeshMultiviewViewCount : 0u,
         .max_sampler_anisotropy = limits.maxSamplerAnisotropy,
@@ -4206,10 +4208,16 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
         };
     }
 
+    const bool depth_resolve = desc.depth.render_view && desc.depth.resolve_view && desc.depth.resolve != DepthResolve::none;
     const VkRenderingAttachmentInfo depth_attachment{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView = desc.depth.render_view ? desc.depth.render_view->view : VK_NULL_HANDLE,
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .resolveMode = !depth_resolve ? VK_RESOLVE_MODE_NONE :
+                       desc.depth.resolve == DepthResolve::min ? VK_RESOLVE_MODE_MIN_BIT :
+                       desc.depth.resolve == DepthResolve::max ? VK_RESOLVE_MODE_MAX_BIT : VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
+        .resolveImageView = depth_resolve ? desc.depth.resolve_view->view : VK_NULL_HANDLE,
+        .resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL,
         .loadOp = static_cast<VkAttachmentLoadOp>(desc.depth.load),
         .storeOp = static_cast<VkAttachmentStoreOp>(desc.depth.store),
         .clearValue = {

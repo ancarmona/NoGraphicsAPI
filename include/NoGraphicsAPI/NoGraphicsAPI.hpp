@@ -377,6 +377,15 @@ enum class StoreOp : uint8
     discard,
 };
 
+// How a multisampled depth attachment's samples become one value in DepthAttachment::resolve_view when the pass ends.
+enum class DepthResolve : uint8
+{
+    none,
+    sample_zero,
+    min, // DeviceCaps::depth_resolve_min_max
+    max, // DeviceCaps::depth_resolve_min_max
+};
+
 enum class StencilOp : uint8
 {
     keep,
@@ -467,6 +476,7 @@ struct DeviceCaps
     // and for integer color attachments, that are also sampleable. Formats can support fewer; get_texture_size_align() checks them.
     uint32 sample_counts = 1;
     uint32 integer_sample_counts = 1;
+    bool depth_resolve_min_max = false; // DepthResolve::min and max (sample_zero is always available).
     uint32 max_multiview_view_count = 0; // Views in RenderingDesc::view_mask; zero when multiview rendering is unavailable.
     uint32 max_mesh_multiview_view_count = 0; // Views in MeshPSODesc::view_mask; zero when mesh PSOs cannot use multiview.
     float max_sampler_anisotropy = 1.0f; // The largest SamplerDesc::max_anisotropy that takes effect.
@@ -717,6 +727,11 @@ struct DepthAttachment
     LoadOp load = LoadOp::load;
     StoreOp store = StoreOp::store;
     float clear = 1.0f;
+    // Optional resolve of a multisampled render_view: a one-sample render view of the same format, size and layers receives each
+    // pixel's resolved depth when the pass ends (with view_mask, each view's layer). store still decides whether the samples are kept.
+    // The resolve view's texture needs TextureUsage::depth_stencil_attachment. Not with a suspending pass: resolve in the last one.
+    RenderView* resolve_view = nullptr;
+    DepthResolve resolve = DepthResolve::none;
 };
 
 struct StencilAttachment

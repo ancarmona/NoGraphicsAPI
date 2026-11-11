@@ -257,8 +257,11 @@ color, such as `r32_uint` or `rg32_uint` visibility IDs. `get_texture_size_align
 Multisample textures are 2D or 2D arrays with one mip level and no storage usage, as Vulkan requires; they stay in
 `GENERAL` like every other texture. Raster PSOs set the same `sample_count` as their attachments.
 
-There is no hardware resolve, no resolve attachment and no `VK_EXT_multisampled_render_to_single_sampled`.
-Applications resolve in compute or fragment shaders: a sampled descriptor of a multisample texture binds as
+The one hardware resolve is the depth attachment's: `DepthAttachment::resolve_view` with `DepthResolve::sample_zero`, `min` or `max`
+writes each pixel's resolved depth into a one-sample render view when the pass ends (`VkRenderingAttachmentInfo::resolveMode`;
+`DeviceCaps::depth_resolve_min_max` tells whether the device reports `VK_RESOLVE_MODE_MIN_BIT` and `MAX_BIT`). It serves a
+depth pyramid: reading one resolved value per pixel is much cheaper than reading every sample. There is no color resolve
+attachment and no `VK_EXT_multisampled_render_to_single_sampled`. Applications resolve color in compute or fragment shaders: a sampled descriptor of a multisample texture binds as
 `Texture2DMS<T>` or `Texture2DMSArray<T>` (`gpu_texture_ms`, `gpu_texture_ms_array`), and `Load(pixel, sample)` reads one sample,
 including depth. Memory copies (`copy_memory_to_texture`, `copy_texture_to_memory`) require single-sample textures.
 With Vulkan standard sample locations, 4x places samples 0 and 2 in the left half of the pixel and samples 1 and 3 in the right half.

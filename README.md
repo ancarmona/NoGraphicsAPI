@@ -35,7 +35,8 @@ still needs. NoGraphicsAPI makes that alternative data model the foundation of t
 - **Barriers without resource lists.** Synchronization describes which work produces and consumes
   data, not a list of buffer and image transitions. Applications do not track image layouts.
 - **MSAA and multiview (Vulkan).** Multisample color, integer and depth attachments that shaders read per sample,
-  alpha-to-coverage, and view-mask rendering into texture arrays with `SV_ViewID`. Resolves are application shaders.
+  alpha-to-coverage, and view-mask rendering into texture arrays with `SV_ViewID`. Color resolves are application shaders; a depth attachment can resolve
+  to one sample per pixel (sample 0, min or max) when its pass ends.
 
 This is a low-level library: the application still owns allocation policy, resource lifetime, and
 GPU synchronization. The optional NoGraphicsAPIUtility library supplies shared shader types, math,
