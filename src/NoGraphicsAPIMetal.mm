@@ -1848,6 +1848,20 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
         }
         render_attachment(pass.depthAttachment, desc.depth.render_view, desc.depth.load, desc.depth.store);
         pass.depthAttachment.clearDepth = desc.depth.clear;
+        // The pass descriptor is reused: the resolve is set or cleared every time
+        const bool depth_resolve = desc.depth.render_view && desc.depth.resolve_view && desc.depth.resolve != DepthResolve::none;
+        pass.depthAttachment.resolveTexture = depth_resolve ? desc.depth.resolve_view->texture : nil;
+        if (depth_resolve)
+        {
+            assert(desc.depth.render_view->texture.sampleCount > 1 && desc.depth.resolve_view->texture.sampleCount == 1);
+            pass.depthAttachment.resolveLevel = desc.depth.resolve_view->mip;
+            pass.depthAttachment.resolveSlice = desc.depth.resolve_view->slice;
+            pass.depthAttachment.depthResolveFilter = desc.depth.resolve == DepthResolve::min ? MTLMultisampleDepthResolveFilterMin :
+                                                      desc.depth.resolve == DepthResolve::max ? MTLMultisampleDepthResolveFilterMax :
+                                                                                               MTLMultisampleDepthResolveFilterSample0;
+            pass.depthAttachment.storeAction = desc.depth.store == StoreOp::store ? MTLStoreActionStoreAndMultisampleResolve :
+                                                                                    MTLStoreActionMultisampleResolve;
+        }
         render_attachment(pass.stencilAttachment, desc.stencil.render_view, desc.stencil.load, desc.stencil.store);
         pass.stencilAttachment.clearStencil = desc.stencil.clear;
         assert(area);
