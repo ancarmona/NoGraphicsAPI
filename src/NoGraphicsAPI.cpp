@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <chrono>
 #if defined(_WIN32)
 #include <wchar.h>
 #endif
@@ -499,6 +500,27 @@ bool is_usable_memory_type(const VkPhysicalDeviceMemoryProperties& properties, u
     return (properties.memoryHeaps[type.heapIndex].flags & VK_MEMORY_HEAP_TILE_MEMORY_BIT_QCOM) == 0;
 }
 
+// Debug logs (NGA_PIPELINE_STATISTICS, NGA_HEAP_LOG): a host clock in ticks and ms between two readings
+long long debug_ticks() noexcept
+{
+    return static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+double debug_ms(long long from, long long to) noexcept
+{
+    return double(to - from) * 1e-6;
+}
+
+void debug_line(const char* format, ...) noexcept
+{
+    char line[512];
+    __builtin_va_list arguments;
+    __builtin_va_start(arguments, format);
+    vsnprintf(line, sizeof(line), format, arguments);
+    __builtin_va_end(arguments);
+    fputs(line, stderr);
+}
+
 constexpr VkAddressCommandFlagsKHR address_flags =
     VK_ADDRESS_COMMAND_FULLY_BOUND_BIT_KHR;
 // A ray_query device's heaps have storage buffer usage (acceleration structure scratch): its address commands say so
@@ -706,6 +728,10 @@ struct Device
 {
     // NGA_PIPELINE_STATISTICS=1: each pipeline is created with CAPTURE_STATISTICS and its executables' statistics go to stderr
     bool pipeline_statistics = false;
+    // NGA_HEAP_LOG=1 (debug): each heap allocation's memory type and the memory heaps' budgets go to stderr
+    bool heap_log = false;
+    // The device's creation (debug_ticks), the "t=" of the debug logs
+    long long created_ticks = 0;
     VkInstance instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
     PFN_vkDestroyDebugUtilsMessengerEXT destroy_debug_messenger = nullptr;
@@ -855,6 +881,14 @@ struct Device
             return false;
         }
 
+        if (heap_log)
+        {
+            const VkMemoryType& type = memory_properties.memoryTypes[memory_type];
+            debug_line("NGA_HEAP alloc t=%.1f size_mb=%.3f type=%u heap=%u flags=0x%x required=0x%x heap_flags=0x%x heap_size_mb=%.0f\n",
+                debug_ms(created_ticks, debug_ticks()), double(requirements.size) / 1048576.0, memory_type, type.heapIndex,
+                unsigned(type.propertyFlags), unsigned(required), unsigned(memory_properties.memoryHeaps[type.heapIndex].flags),
+                double(memory_properties.memoryHeaps[type.heapIndex].size) / 1048576.0);
+        }
         if ((required & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0)
         {
             if (error_from_vk(vkMapMemory(device, result.memory, 0, VK_WHOLE_SIZE, 0, &result.mapped), "vkMapMemory", requirements.size) != Error::none)
@@ -2161,6 +2195,8 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
 #if defined(_WIN32)
         const wchar_t* value = _wgetenv(L"NGA_PIPELINE_STATISTICS");
         state->pipeline_statistics = value && value[0] == L'1';
+        const wchar_t* heap_value = _wgetenv(L"NGA_HEAP_LOG");
+        state->heap_log = heap_value && heap_value[0] == L'1';
 #endif
     }
     if (state->pipeline_statistics)
@@ -2178,6 +2214,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
                               "VulkanCreateHooks::create_device");
     else
         error = error_from_vk(vkCreateDevice(state->physical_device, &device_info, nullptr, &state->device), "vkCreateDevice");
+    state->created_ticks = debug_ticks();
     delete[] queue_priorities;
     if (error != Error::none)
         return fail_device_creation(state, error);
@@ -3017,6 +3054,12 @@ TextureHeap create_texture_heap(Device* device, uint64 byte_count) noexcept
         delete owner;
         return {};
     }
+    if (device->heap_log)
+    {
+        const VkMemoryType& type = device->memory_properties.memoryTypes[device->texture_memory_type];
+        debug_line("NGA_HEAP texture t=%.1f size_mb=%.3f type=%u heap=%u flags=0x%x\n", debug_ms(device->created_ticks, debug_ticks()),
+            double(byte_count) / 1048576.0, device->texture_memory_type, type.heapIndex, unsigned(type.propertyFlags));
+    }
     return {
         .size = byte_count,
         .owner = owner,
@@ -3635,11 +3678,15 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
         .state = device,
         .bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS,
     };
+    const long long create_start = debug_ticks();
     if (error_from_vk(vkCreateGraphicsPipelines(device->device, VK_NULL_HANDLE, 1, &pso_info, nullptr, &result->pso), "vkCreateGraphicsPipelines") != Error::none)
     {
         delete result;
         return nullptr;
     }
+    if (device->pipeline_statistics)
+        stat_line("NGA_PSO %s graphics t=%.1f create_ms=%.2f pso=%p\n", fragment.code.size ? fragment.entry_point : first_stage.entry_point,
+            debug_ms(device->created_ticks, create_start), debug_ms(create_start, debug_ticks()), static_cast<void*>(result));
     report_pipeline_statistics(device, result->pso, fragment.code.size ? fragment.entry_point : first_stage.entry_point);
     return result;
 }
@@ -3697,13 +3744,53 @@ PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept
         .state = device,
         .bind_point = VK_PIPELINE_BIND_POINT_COMPUTE,
     };
+    const long long create_start = debug_ticks();
     if (error_from_vk(vkCreateComputePipelines(device->device, VK_NULL_HANDLE, 1, &pso_info, nullptr, &result->pso), "vkCreateComputePipelines") != Error::none)
     {
         delete result;
         return nullptr;
     }
+    if (device->pipeline_statistics)
+        stat_line("NGA_PSO %s compute t=%.1f create_ms=%.2f pso=%p\n", compute.entry_point, debug_ms(device->created_ticks, create_start),
+            debug_ms(create_start, debug_ticks()), static_cast<void*>(result));
     report_pipeline_statistics(device, result->pso, compute.entry_point);
     return result;
+}
+
+void debug_pipeline_statistics(PSO* pso, const char* label) noexcept
+{
+    if (!pso || !pso->state || !pso->state->pipeline_statistics)
+        return;
+    stat_line("NGA_PSO_LABEL %s t=%.1f pso=%p\n", label, debug_ms(pso->state->created_ticks, debug_ticks()), static_cast<void*>(pso));
+    report_pipeline_statistics(pso->state, pso->pso, label);
+}
+
+void debug_memory_report(Device* device, const char* label) noexcept
+{
+    if (!device || !device->heap_log)
+        return;
+    const double t = debug_ms(device->created_ticks, debug_ticks());
+    static VkExtensionProperties extensions[1024];
+    uint32 extension_count = 1024;
+    bool budget_supported = false;
+    if (vkEnumerateDeviceExtensionProperties(device->physical_device, nullptr, &extension_count, extensions) >= VK_SUCCESS)
+        for (uint32 i = 0; i < extension_count; ++i)
+            budget_supported |= strcmp(extensions[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+        .pNext = budget_supported ? &budget : nullptr,
+    };
+    vkGetPhysicalDeviceMemoryProperties2(device->physical_device, &properties);
+    const VkPhysicalDeviceMemoryProperties& memory = properties.memoryProperties;
+    debug_line("NGA_MEM %s t=%.1f memory_budget=%u types=%u heaps=%u texture_type=%u\n", label, t, budget_supported ? 1u : 0u,
+        memory.memoryTypeCount, memory.memoryHeapCount, device->texture_memory_type);
+    for (uint32 i = 0; i < memory.memoryTypeCount; ++i)
+        debug_line("NGA_MEM %s type %u heap=%u flags=0x%x\n", label, i, memory.memoryTypes[i].heapIndex, unsigned(memory.memoryTypes[i].propertyFlags));
+    for (uint32 i = 0; i < memory.memoryHeapCount; ++i)
+        debug_line("NGA_MEM %s heap %u size_mb=%.1f flags=0x%x budget_mb=%.1f usage_mb=%.1f\n", label, i,
+            double(memory.memoryHeaps[i].size) / 1048576.0, unsigned(memory.memoryHeaps[i].flags),
+            budget_supported ? double(budget.heapBudget[i]) / 1048576.0 : -1.0, budget_supported ? double(budget.heapUsage[i]) / 1048576.0 : -1.0);
 }
 
 void destroy_pso(PSO* pso) noexcept
