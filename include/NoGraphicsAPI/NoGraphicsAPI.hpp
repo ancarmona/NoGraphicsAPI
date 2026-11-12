@@ -924,6 +924,13 @@ struct CalibratedTimestamps
 void begin_debug_label(CommandBuffer* commands, const char* name) noexcept;
 void end_debug_label(CommandBuffer* commands) noexcept;
 
+// Debug logs to stderr (Vulkan; no effect elsewhere or when the variable is not set). NGA_PIPELINE_STATISTICS=1: the pipeline's
+// executable statistics again under a label, with the time since the device's creation ("NGA_PSO_LABEL <label> t=<ms>", then the
+// "NGA_STAT <label> ..." lines). NGA_HEAP_LOG=1: each heap's memory type and size at its allocation, and here the memory heaps'
+// budgets and usage (VK_EXT_memory_budget) under a label.
+void debug_pipeline_statistics(PSO* pso, const char* label) noexcept;
+void debug_memory_report(Device* device, const char* label) noexcept;
+
 // Every render pass starts with no graphics PSO. Bind one inside the pass before drawing, including every resumed segment.
 // Render-pass boundaries invalidate the current PSO selection; rebind a compute PSO before dispatching after a render pass.
 // Each segment needs matching attachments, load/store operations, and clear values, and its own begin/end_render_pass pair.
