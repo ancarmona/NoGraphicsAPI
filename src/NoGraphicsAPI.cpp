@@ -1591,6 +1591,8 @@ struct Candidate
     bool storage_input_output16 = false;
     bool multiview_mesh_shader = false;
     bool khr_swapchain_maintenance1 = false;
+    bool buffer_int64_atomics = false; // 64-bit integer atomics on storage buffers (Vulkan 1.2 shaderBufferInt64Atomics)
+    bool sample_rate_shading = false; // Per-sample fragment shading (sampleRateShading), for shaders that read the sample index
     bool ray_query = false; // VK_KHR_acceleration_structure, VK_KHR_ray_query and VK_KHR_deferred_host_operations, with their features
     VkPhysicalDeviceDescriptorHeapPropertiesEXT heap_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT};
     VkPhysicalDeviceVulkan11Properties vulkan11_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
@@ -1727,6 +1729,8 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
     result.storage_input_output16 = features.vulkan11.storageInputOutput16 == VK_TRUE;
     result.multiview_mesh_shader = features.mesh_shader.multiviewMeshShader == VK_TRUE;
     result.khr_swapchain_maintenance1 = khr_swapchain_maintenance1;
+    result.buffer_int64_atomics = features.vulkan12.shaderBufferInt64Atomics == VK_TRUE && features.core.features.shaderInt64 == VK_TRUE;
+    result.sample_rate_shading = features.core.features.sampleRateShading == VK_TRUE;
     // The shaders convert a 64-bit address into the structure (OpConvertUToAccelerationStructureKHR): 64-bit integers come with it
     result.ray_query = ray_query_extensions && features.acceleration_structure.accelerationStructure == VK_TRUE &&
                        features.ray_query.rayQuery == VK_TRUE && features.core.features.shaderInt64 == VK_TRUE;
@@ -2040,7 +2044,8 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     QueriedFeatures enabled_features(presentation, selected.unified_image_layouts, selected.address_commands, selected.ray_query);
     enabled_features.acceleration_structure.accelerationStructure = VK_TRUE;
     enabled_features.ray_query.rayQuery = VK_TRUE;
-    enabled_features.core.features.shaderInt64 = selected.ray_query ? VK_TRUE : VK_FALSE;
+    enabled_features.core.features.shaderInt64 = selected.ray_query || selected.buffer_int64_atomics ? VK_TRUE : VK_FALSE;
+    enabled_features.core.features.sampleRateShading = selected.sample_rate_shading;
     state->texture_compression_etc2 = selected.texture_compression_etc2;
     enabled_features.core.features.imageCubeArray = selected.image_cube_array;
     enabled_features.core.features.samplerAnisotropy = VK_TRUE;
@@ -2066,6 +2071,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     enabled_features.vulkan12.timelineSemaphore = VK_TRUE;
     enabled_features.vulkan12.hostQueryReset = selected.timestamps[0] || selected.timestamps[1] || selected.timestamps[2];
     enabled_features.vulkan12.bufferDeviceAddress = VK_TRUE;
+    enabled_features.vulkan12.shaderBufferInt64Atomics = selected.buffer_int64_atomics;
     enabled_features.vulkan13.synchronization2 = VK_TRUE;
     enabled_features.vulkan13.dynamicRendering = VK_TRUE;
     enabled_features.vulkan13.maintenance4 = VK_TRUE;
