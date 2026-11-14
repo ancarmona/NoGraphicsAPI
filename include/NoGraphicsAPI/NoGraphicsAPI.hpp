@@ -786,6 +786,10 @@ void destroy_device(Device* device) noexcept;
 // Call after wait_idle, outside an acquired frame. Unsupported pairs leave the current mode unchanged.
 // A zero-size drawable defers swapchain recreation until acquire sees a nonzero extent.
 [[nodiscard]] Error set_swapchain_format(Device* device, Format format, ColorSpace color_space) noexcept;
+// Presentation waits for the display's refresh (true, the default) or not (false: no frame-rate cap, tearing possible). Metal
+// (macOS): CAMetalLayer::displaySyncEnabled. Vulkan: FIFO, or IMMEDIATE (MAILBOX when IMMEDIATE is missing; unsupported without both),
+// the swapchain recreated. Call after wait_idle, outside an acquired frame.
+[[nodiscard]] Error set_swapchain_vsync(Device* device, bool vsync) noexcept;
 
 [[nodiscard]] TimelineSemaphore* create_timeline_semaphore(Device* device, uint64 initial_value = 0) noexcept;
 void destroy_timeline_semaphore(TimelineSemaphore* semaphore) noexcept;

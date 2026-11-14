@@ -45,7 +45,6 @@ constexpr uint32 max_queue_families = 64;
 constexpr uint32 queue_type_count = 3; // General, compute-only, copy-only.
 constexpr uint32 max_color_attachments = 8;
 constexpr uint32 max_swapchain_images = 8;
-constexpr VkPresentModeKHR swapchain_present_mode = VK_PRESENT_MODE_FIFO_KHR;
 constexpr uint32 gpu_allocation_alignment = 16;
 constexpr uint32 max_surface_formats = 64;
 constexpr uint32 format_count = static_cast<uint32>(Format::undefined);
@@ -1444,6 +1443,7 @@ struct Swapchain
     uint32 height = 0;
     Format format = Format::bgra8_srgb;
     VkColorSpaceKHR color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR; // set_swapchain_vsync
     VkSurfaceTransformFlagBitsKHR transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     VkCompositeAlphaFlagBitsKHR composite_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     detail::PresentContext* present_context = nullptr;
@@ -2565,7 +2565,7 @@ Error recreate_swapchain(Swapchain& swapchain) noexcept
     assert(!swapchain.acquired && !device.acquired_swapchain);
     const VkSurfacePresentModeKHR present_mode_info{
         .sType = VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_KHR,
-        .presentMode = swapchain_present_mode,
+        .presentMode = swapchain.present_mode,
     };
     const VkPhysicalDeviceSurfaceInfo2KHR surface_info{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR,
@@ -2640,7 +2640,7 @@ Error recreate_swapchain(Swapchain& swapchain) noexcept
     const VkSwapchainPresentModesCreateInfoKHR present_modes_info{
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_KHR,
         .presentModeCount = 1,
-        .pPresentModes = &swapchain_present_mode,
+        .pPresentModes = &swapchain.present_mode,
     };
     const VkSwapchainCreateInfoKHR create_info{
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -2657,7 +2657,7 @@ Error recreate_swapchain(Swapchain& swapchain) noexcept
         .pQueueFamilyIndices = device.queue_families,
         .preTransform = capabilities.currentTransform,
         .compositeAlpha = composite_alpha,
-        .presentMode = swapchain_present_mode,
+        .presentMode = swapchain.present_mode,
         .clipped = VK_TRUE,
         .oldSwapchain = old_handle,
     };
@@ -2758,6 +2758,45 @@ Error set_swapchain_format(Device* device, Format format, ColorSpace color_space
     {
         swapchain.format = old_format;
         swapchain.color_space = old_color_space;
+        // vkCreateSwapchainKHR retires oldSwapchain even when creation fails.
+        if (!swapchain.handle)
+            require_error(recreate_swapchain(swapchain), "Swapchain recreation");
+    }
+    return error;
+}
+
+Error set_swapchain_vsync(Device* device, bool vsync) noexcept
+{
+    assert(device && !device->acquired_swapchain);
+    if (!device->swapchain)
+        return Error::unsupported;
+    Swapchain& swapchain = *device->swapchain;
+    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
+    if (!vsync)
+    {
+        VkPresentModeKHR modes[16]{};
+        uint32 count = 16;
+        const VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(device->physical_device, device->surface, &count, modes);
+        if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+            return error_from_vk(result, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+        bool immediate = false, mailbox = false;
+        for (uint32 index = 0; index < count; index++)
+        {
+            immediate = immediate || modes[index] == VK_PRESENT_MODE_IMMEDIATE_KHR;
+            mailbox = mailbox || modes[index] == VK_PRESENT_MODE_MAILBOX_KHR;
+        }
+        if (!immediate && !mailbox)
+            return Error::unsupported;
+        mode = immediate ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+    if (swapchain.present_mode == mode)
+        return Error::none;
+    const VkPresentModeKHR old_mode = swapchain.present_mode;
+    swapchain.present_mode = mode;
+    const Error error = recreate_swapchain(swapchain);
+    if (error != Error::none)
+    {
+        swapchain.present_mode = old_mode;
         // vkCreateSwapchainKHR retires oldSwapchain even when creation fails.
         if (!swapchain.handle)
             require_error(recreate_swapchain(swapchain), "Swapchain recreation");

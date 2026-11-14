@@ -766,6 +766,19 @@ Error set_swapchain_format(Device* device, Format format, ColorSpace color_space
     }
 }
 
+Error set_swapchain_vsync(Device* device, bool vsync) noexcept
+{
+    assert(device && !device->drawable && !device->acquired);
+    if (!device->layer)
+        return Error::unsupported;
+#if TARGET_OS_OSX
+    device->layer.displaySyncEnabled = vsync ? YES : NO;
+    return Error::none;
+#else
+    return vsync ? Error::none : Error::unsupported;
+#endif
+}
+
 uint32x2 get_drawable_extent(Device* device) noexcept
 {
     @autoreleasepool
