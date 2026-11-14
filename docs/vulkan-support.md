@@ -34,6 +34,7 @@ conventional feature checked by device creation.
 | Vulkan 1.1 `multiview` | Required. Dynamic-rendering view masks render several array layers in one pass. `multiviewMeshShader` is enabled when available. |
 | Core Vulkan dynamic state | Command-set viewport, scissor, and exposed depth/stencil state. |
 | Timeline semaphores | Application-visible completion points and cross-queue waits; private swapchain retirement. |
+| 64-bit buffer atomics (optional) | `shaderBufferInt64Atomics` with `shaderInt64` is enabled when available: `InterlockedMax` and friends on 64-bit storage values, as a software rasterizer's depth-and-ID word needs. |
 | 64-bit timestamps (optional) | Supported queues capture GPU markers; `read_timestamps(pool)` retrieves them into CPU memory after submission completion. |
 | Shader and layout features | Scalar layout, float16, 16-bit storage access, draw parameters, and independent blending. |
 | Texture features | Compression is reported through `DeviceCaps`; exact format and usage support is queried with `supports_texture_format`. |
@@ -295,6 +296,7 @@ With Vulkan standard sample locations, 4x places samples 0 and 2 in the left hal
 `alpha_to_coverage` in the PSO derives coverage from the alpha of fragment output `SV_Target0`. Vulkan skips it when that
 output is an integer type, so put a float target first. The state is fixed at PSO creation;
 `VK_EXT_extended_dynamic_state3` is not used. Shaders can also read or write `SV_Coverage` (SPIR-V `SampleMask`) in the fragment stage.
+A fragment shader that reads `SV_SampleIndex` runs once per sample; `sampleRateShading` is enabled when available (Metal always has it).
 
 ## Multiview
 
