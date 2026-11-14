@@ -2804,6 +2804,12 @@ Error set_swapchain_vsync(Device* device, bool vsync) noexcept
     return error;
 }
 
+Error set_swapchain_min_present_duration(Device* device, float seconds) noexcept
+{
+    assert(device && seconds >= 0.0f);
+    return seconds == 0.0f ? Error::none : Error::unsupported;
+}
+
 uint32x2 get_drawable_extent(Device* device) noexcept
 {
     assert(device && "get_drawable_extent called with a null device");

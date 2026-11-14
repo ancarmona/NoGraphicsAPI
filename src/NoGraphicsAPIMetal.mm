@@ -322,6 +322,7 @@ struct Device
     id<MTLCommandQueue> presentation_queue = nil;
     CAMetalLayer* layer = nil;
     id<CAMetalDrawable> drawable = nil;
+    double min_present_duration = 0.0; // set_swapchain_min_present_duration, seconds
     CommandBuffer* acquired = nullptr;
     RenderView drawable_view = {};
     DeviceCaps caps = {};
@@ -764,6 +765,15 @@ Error set_swapchain_format(Device* device, Format format, ColorSpace color_space
         device->layer.pixelFormat = pixel_format(format);
         return Error::none;
     }
+}
+
+Error set_swapchain_min_present_duration(Device* device, float seconds) noexcept
+{
+    assert(device && seconds >= 0.0f);
+    if (!device->layer)
+        return Error::unsupported;
+    device->min_present_duration = seconds;
+    return Error::none;
 }
 
 Error set_swapchain_vsync(Device* device, bool vsync) noexcept
@@ -1534,13 +1544,19 @@ void submit_and_present(Device* device, const SubmitDesc& desc) noexcept
             // Steam's macOS overlay hooks command-buffer presentation, including frames rendered with Metal 4.
             id<MTLCommandBuffer> presentation = [device->presentation_queue commandBuffer];
             [presentation encodeWaitForEvent:device->queues[0].completion value:device->queues[0].submitted_value];
-            [presentation presentDrawable:device->drawable];
+            if (device->min_present_duration > 0.0)
+                [presentation presentDrawable:device->drawable afterMinimumDuration:device->min_present_duration];
+            else
+                [presentation presentDrawable:device->drawable];
             [presentation commit];
         }
         else
         {
             [device->queues[0].queue signalDrawable:device->drawable];
-            [device->drawable present];
+            if (device->min_present_duration > 0.0)
+                [device->drawable presentAfterMinimumDuration:device->min_present_duration];
+            else
+                [device->drawable present];
         }
         [device->drawable release];
         device->acquired->acquired = false;

@@ -790,6 +790,9 @@ void destroy_device(Device* device) noexcept;
 // (macOS): CAMetalLayer::displaySyncEnabled. Vulkan: FIFO, or IMMEDIATE (MAILBOX when IMMEDIATE is missing; unsupported without both),
 // the swapchain recreated. Call after wait_idle, outside an acquired frame.
 [[nodiscard]] Error set_swapchain_vsync(Device* device, bool vsync) noexcept;
+// Each presented image stays on screen at least this many seconds (0: no minimum, the default): a steady pace when the GPU misses the
+// display's refresh. Metal: MTLDrawable presentAfterMinimumDuration. Vulkan: unsupported (only 0 is accepted).
+[[nodiscard]] Error set_swapchain_min_present_duration(Device* device, float seconds) noexcept;
 
 [[nodiscard]] TimelineSemaphore* create_timeline_semaphore(Device* device, uint64 initial_value = 0) noexcept;
 void destroy_timeline_semaphore(TimelineSemaphore* semaphore) noexcept;
