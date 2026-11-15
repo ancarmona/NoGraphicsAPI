@@ -1341,8 +1341,11 @@ GpuHeap Device::allocate_gpu_heap(VkDeviceSize size, MemoryType memory) noexcept
         avoided = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
         break;
     case MemoryType::readback:
-        required = cpu_visible_memory_properties;
+        // System memory: the GPU writes it once over PCIe, the CPU reads it through its caches. Mapped device-local memory
+        // (ReBAR) is uncached for CPU reads: about 37 MB/s measured on an RTX 4090 (Surfbird T4)
+        required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         preferred = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        avoided = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         break;
     default:
         assert(false && "create_gpu_heap received an invalid memory type");

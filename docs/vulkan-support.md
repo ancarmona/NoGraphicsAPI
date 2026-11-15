@@ -52,7 +52,10 @@ Debug builds enable `VK_EXT_debug_utils` and the Khronos validation layer when a
 The backend requires device-local host-visible coherent memory for mapped heaps and descriptor
 heaps, plus compatible device-local memory for GPU-only heaps and textures. GPU-only selections
 prefer a non-host-visible type, but can use a host-visible UMA type without mapping or exposing it.
-There is no host-only or non-coherent fallback path.
+Readback heaps are the exception: host-visible coherent memory that prefers host-cached and avoids
+device-local types, because CPU reads of mapped device-local memory (ReBAR) bypass the CPU caches
+(about 37 MB/s measured on an RTX 4090 with NVIDIA 616.56). On UMA devices every type is device-local
+and the readback heap uses one of them. There is no non-coherent path.
 
 `create_gpu_heap()` returns one application-sized block. `cpu_visible`, `gpu_only`, and `readback`
 provide addressable data storage. Opaque texture and sampler descriptor heaps use separate creation APIs.
