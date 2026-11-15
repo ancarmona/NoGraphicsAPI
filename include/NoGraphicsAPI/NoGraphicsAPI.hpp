@@ -586,13 +586,13 @@ struct TextureDesc
 
 struct RenderViewDesc
 {
-    Format format = Format::undefined; // Undefined inherits the texture format.
+    // Undefined inherits the texture format. Another format needs a compatible format on a mutable_format texture (or the paired
+    // sRGB/UNORM view on an srgb_views texture), such as rgba8_unorm on an rgba8_srgb texture: writes then store the shader's values
+    // without sRGB encoding.
+    Format format = Format::undefined;
     uint32 mip_level = 0;
     uint32 slice = 0; // Physical array slice; cube faces are individual slices.
     uint32 layer_count = 1; // Consecutive slices from slice. More than one creates an array view for multiview rendering.
-    // Undefined inherits the texture format. Another format needs a mutable_format texture and a compatible format, such as
-    // rgba8_unorm on an rgba8_srgb texture: writes then store the shader's values without sRGB encoding.
-    Format format = Format::undefined;
 };
 
 struct TextureDescriptorDesc
