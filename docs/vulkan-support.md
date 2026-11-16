@@ -228,7 +228,8 @@ producer/consumer hazard, while resource identity and image-layout bookkeeping d
 public API.
 
 Every ordinary texture use—sampling, storage access, attachment access, and copies—uses
-`VK_IMAGE_LAYOUT_GENERAL`. `VK_KHR_unified_image_layouts`, when available, makes that choice
+`VK_IMAGE_LAYOUT_GENERAL`. `copy_texture()` copies every layer of mip 0 between two textures of one size (`vkCmdCopyImage2`,
+both in `GENERAL`), such as a frame's color and depth into OpenXR swapchain images. `VK_KHR_unified_image_layouts`, when available, makes that choice
 efficient rather than merely legal.
 
 The backend privately handles the two unavoidable cases:

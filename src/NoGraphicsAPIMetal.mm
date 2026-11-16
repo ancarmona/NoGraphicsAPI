@@ -1712,6 +1712,11 @@ void end_pipeline_statistics(CommandBuffer*) noexcept
 {
 }
 
+// Not built on Metal yet: Vulkan only (the OpenXR swapchains' copy)
+void copy_texture(CommandBuffer*, Texture*, Texture*) noexcept
+{
+}
+
 void write_timestamp(CommandBuffer* commands, uint64* cpu_destination, Stage stage) noexcept
 {
     @autoreleasepool

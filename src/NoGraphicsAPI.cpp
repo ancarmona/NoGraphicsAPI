@@ -5280,6 +5280,29 @@ void copy_texture_to_memory(CommandBuffer* commands, Texture* source, GpuRange d
     commands->state->fn.cmd_copy_image_to_memory(commands->command_buffer, &info);
 }
 
+void copy_texture(CommandBuffer* commands, Texture* source, Texture* destination) noexcept
+{
+    assert(commands && commands->state && source && destination && source->sample_count == 1 && destination->sample_count == 1);
+    assert(source->width == destination->width && source->height == destination->height && source->layer_count == destination->layer_count);
+    flush_barriers(commands);
+    const VkImageCopy2 region{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+        .srcSubresource = {.aspectMask = image_aspects(source->format), .layerCount = source->layer_count},
+        .dstSubresource = {.aspectMask = image_aspects(destination->format), .layerCount = destination->layer_count},
+        .extent = {source->width, source->height, 1},
+    };
+    const VkCopyImageInfo2 info{
+        .sType = VK_STRUCTURE_TYPE_COPY_IMAGE_INFO_2,
+        .srcImage = source->image,
+        .srcImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .dstImage = destination->image,
+        .dstImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .regionCount = 1,
+        .pRegions = &region,
+    };
+    vkCmdCopyImage2(commands->command_buffer, &info);
+}
+
 void barrier(CommandBuffer* commands, Stage before, Access before_access, Stage after, Access after_access) noexcept
 {
     assert(commands);

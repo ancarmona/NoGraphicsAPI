@@ -926,6 +926,9 @@ void copy_memory(CommandBuffer* commands, GpuRange source, GpuRange destination)
 // Depth/stencil copies require a general queue. Copy-only queues also require DeviceCaps::copy_texture_granularity alignment.
 void copy_memory_to_texture(CommandBuffer* commands, GpuRange source, Texture* destination, const TextureCopyDesc& copy = {}) noexcept;
 void copy_texture_to_memory(CommandBuffer* commands, Texture* source, GpuRange destination, const TextureCopyDesc& copy = {}) noexcept;
+// Every layer of mip 0 of source into destination: one sample each, the same size, layer count and block size (an sRGB and a UNORM
+// format of one size, or the same depth format). Needs transfer_source and transfer_destination usage. Vulkan only (Metal: nothing).
+void copy_texture(CommandBuffer* commands, Texture* source, Texture* destination) noexcept;
 
 void barrier(CommandBuffer* commands, Stage before, Access before_access, Stage after, Access after_access) noexcept;
 
