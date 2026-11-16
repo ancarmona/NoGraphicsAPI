@@ -684,6 +684,11 @@ struct CommandBuffer
     uint64** timestamp_destinations = nullptr;
     uint64* timestamp_results = nullptr;
     uint32 timestamp_count = 0;
+    VkQueryPool statistics_pool = VK_NULL_HANDLE;
+    PipelineStatistics** statistics_destinations = nullptr;
+    uint64* statistics_results = nullptr;
+    uint32 statistics_count = 0;
+    bool statistics_active = false;
     VkMemoryBarrier2 pending_barrier{};
     VkImageMemoryBarrier2 acquire_barrier{};
     Swapchain* swapchain = nullptr;
@@ -746,6 +751,7 @@ struct Device
     uint32 queue_families[queue_type_count]{};
     uint32 queue_family_count = 0;
     uint32 timestamp_query_count = 0;
+    uint32 statistics_query_count = 0; // Zero: pipeline statistics disabled or unsupported
     VkPhysicalDeviceMemoryProperties memory_properties{};
     VkPhysicalDeviceProperties physical_properties{};
     VkPhysicalDeviceDescriptorHeapPropertiesEXT heap_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT};
@@ -1680,6 +1686,7 @@ struct Candidate
     bool relative_present = false;
     bool descriptor_heap = false;
     bool buffer_int64_atomics = false; // 64-bit integer atomics on storage buffers (Vulkan 1.2 shaderBufferInt64Atomics)
+    bool pipeline_statistics = false; // pipelineStatisticsQuery
     bool sample_rate_shading = false; // Per-sample fragment shading (sampleRateShading), for shaders that read the sample index
     bool ray_query = false; // VK_KHR_acceleration_structure, VK_KHR_ray_query and VK_KHR_deferred_host_operations, with their features
     VkPhysicalDeviceDescriptorHeapPropertiesEXT heap_properties{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT};
@@ -1856,6 +1863,7 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
 #endif
     result.descriptor_heap = native_heap;
     result.buffer_int64_atomics = features.vulkan12.shaderBufferInt64Atomics == VK_TRUE && features.core.features.shaderInt64 == VK_TRUE;
+    result.pipeline_statistics = features.core.features.pipelineStatisticsQuery == VK_TRUE;
     result.sample_rate_shading = features.core.features.sampleRateShading == VK_TRUE;
     // The shaders convert a 64-bit address into the structure (OpConvertUToAccelerationStructureKHR): 64-bit integers come with it
     result.ray_query = ray_query_extensions && features.acceleration_structure.accelerationStructure == VK_TRUE &&
@@ -2258,6 +2266,8 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     enabled_features.ray_query.rayQuery = VK_TRUE;
     if (selected.ray_query || selected.buffer_int64_atomics) enabled_features.core.features.shaderInt64 = VK_TRUE;
     enabled_features.core.features.sampleRateShading = selected.sample_rate_shading;
+    enabled_features.core.features.pipelineStatisticsQuery = selected.pipeline_statistics && desc.pipeline_statistics_query_count != 0;
+    state->statistics_query_count = selected.pipeline_statistics ? desc.pipeline_statistics_query_count : 0;
     state->texture_compression_etc2 = selected.texture_compression_etc2;
     enabled_features.core.features.imageCubeArray = selected.image_cube_array;
     enabled_features.core.features.samplerAnisotropy = VK_TRUE;
@@ -2686,6 +2696,28 @@ void write_timestamp(CommandBuffer* commands, uint64* cpu_destination, Stage sta
     flush_barriers(commands);
     commands->timestamp_destinations[commands->timestamp_count] = cpu_destination;
     vkCmdWriteTimestamp2(commands->command_buffer, to_vk(stage), commands->timestamp_pool, commands->timestamp_count++);
+}
+
+void begin_pipeline_statistics(CommandBuffer* commands, PipelineStatistics* cpu_destination) noexcept
+{
+    assert(commands && commands->state);
+    if (!commands->statistics_pool) return;
+    assert(!commands->statistics_active && "pipeline statistics ranges do not nest");
+    assert(commands->statistics_count < commands->state->statistics_query_count);
+    assert(cpu_destination);
+    flush_barriers(commands);
+    commands->statistics_destinations[commands->statistics_count] = cpu_destination;
+    vkCmdBeginQuery(commands->command_buffer, commands->statistics_pool, commands->statistics_count, 0);
+    commands->statistics_active = true;
+}
+
+void end_pipeline_statistics(CommandBuffer* commands) noexcept
+{
+    assert(commands && commands->state);
+    if (!commands->statistics_pool) return;
+    assert(commands->statistics_active);
+    vkCmdEndQuery(commands->command_buffer, commands->statistics_pool, commands->statistics_count++);
+    commands->statistics_active = false;
 }
 
 GpuHeap create_gpu_heap(Device* device, uint64 byte_count, MemoryType memory) noexcept
@@ -4180,6 +4212,9 @@ void destroy_command_pool(CommandPool* pool) noexcept
         if (commands->timestamp_pool) vkDestroyQueryPool(pool->state->device, commands->timestamp_pool, nullptr);
         free(commands->timestamp_destinations);
         free(commands->timestamp_results);
+        if (commands->statistics_pool) vkDestroyQueryPool(pool->state->device, commands->statistics_pool, nullptr);
+        free(commands->statistics_destinations);
+        free(commands->statistics_results);
         delete commands;
     }
     vkDestroyCommandPool(pool->state->device, pool->command_pool, nullptr);
@@ -4194,6 +4229,8 @@ void reset_command_pool(CommandPool* pool) noexcept
         assert(!commands->swapchain && "an acquired swapchain image must be presented before resetting its command pool");
         commands->submitted = false;
         commands->timestamp_count = 0;
+        commands->statistics_count = 0;
+        commands->statistics_active = false;
     }
     assert_vk(vkResetCommandPool(pool->state->device, pool->command_pool, 0));
     pool->next_buffer = pool->first;
@@ -4210,6 +4247,22 @@ void read_timestamps(CommandPool* pool) noexcept
         for (uint32 index = 0; index < commands->timestamp_count; ++index)
             *commands->timestamp_destinations[index] = commands->timestamp_results[index];
         commands->timestamp_count = 0;
+    }
+    constexpr uint32 statistics_values = sizeof(PipelineStatistics) / sizeof(uint64);
+    for (CommandBuffer* commands = pool->first; commands; commands = commands->next)
+    {
+        if (!commands->submitted || commands->statistics_count == 0) continue;
+        assert_vk(vkGetQueryPoolResults(pool->state->device, commands->statistics_pool, 0, commands->statistics_count,
+                                       sizeof(PipelineStatistics) * commands->statistics_count, commands->statistics_results,
+                                       sizeof(PipelineStatistics), VK_QUERY_RESULT_64_BIT));
+        for (uint32 index = 0; index < commands->statistics_count; ++index)
+        {
+            const uint64* values = commands->statistics_results + index * statistics_values;
+            *commands->statistics_destinations[index] = {.input_primitives = values[0], .vertex_shader_invocations = values[1],
+                                                         .clipping_primitives = values[2], .fragment_shader_invocations = values[3],
+                                                         .compute_shader_invocations = values[4]};
+        }
+        commands->statistics_count = 0;
     }
 }
 
@@ -4283,6 +4336,25 @@ CommandBuffer* begin_commands(CommandPool* pool) noexcept
             commands->timestamp_destinations = static_cast<uint64**>(malloc(sizeof(uint64*) * pool->state->timestamp_query_count));
             commands->timestamp_results = static_cast<uint64*>(malloc(sizeof(uint64) * pool->state->timestamp_query_count));
         }
+        if (pool->state->statistics_query_count != 0 && (pool->queue_flags & VK_QUEUE_GRAPHICS_BIT))
+        {
+            // The order of the counters is the bits' order: PipelineStatistics' fields
+            const VkQueryPoolCreateInfo query_info{
+                .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS,
+                .queryCount = pool->state->statistics_query_count,
+                .pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT |
+                                      VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT |
+                                      VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
+                                      VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT |
+                                      VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT,
+            };
+            if (error_from_vk(vkCreateQueryPool(pool->state->device, &query_info, nullptr, &commands->statistics_pool), "vkCreateQueryPool") == Error::none)
+            {
+                commands->statistics_destinations = static_cast<PipelineStatistics**>(malloc(sizeof(PipelineStatistics*) * pool->state->statistics_query_count));
+                commands->statistics_results = static_cast<uint64*>(malloc(sizeof(PipelineStatistics) * pool->state->statistics_query_count));
+            }
+        }
         if (pool->last)
             pool->last->next = commands;
         else
@@ -4304,6 +4376,10 @@ CommandBuffer* begin_commands(CommandPool* pool) noexcept
     commands->sampler_descriptors = nullptr;
     if (commands->timestamp_pool)
         vkResetQueryPool(pool->state->device, commands->timestamp_pool, 0, pool->state->timestamp_query_count);
+    if (commands->statistics_pool)
+        vkResetQueryPool(pool->state->device, commands->statistics_pool, 0, pool->state->statistics_query_count);
+    commands->statistics_count = 0;
+    commands->statistics_active = false;
     return commands;
 }
 

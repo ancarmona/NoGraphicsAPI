@@ -1703,6 +1703,15 @@ void barrier(CommandBuffer* commands, Stage before, Access before_access, Stage 
     }
 }
 
+// Pipeline statistics: not on Metal (DeviceDesc::pipeline_statistics_query_count is ignored); the destinations stay unchanged
+void begin_pipeline_statistics(CommandBuffer*, PipelineStatistics*) noexcept
+{
+}
+
+void end_pipeline_statistics(CommandBuffer*) noexcept
+{
+}
+
 void write_timestamp(CommandBuffer* commands, uint64* cpu_destination, Stage stage) noexcept
 {
     @autoreleasepool

@@ -544,6 +544,7 @@ struct DeviceDesc
     uint32 desired_compute_queue_count = 0;
     uint32 desired_copy_queue_count = 0;
     uint32 timestamp_query_count = 256; // Per command buffer; zero disables timestamps.
+    uint32 pipeline_statistics_query_count = 0; // Per command buffer; zero disables pipeline statistics (Vulkan's pipelineStatisticsQuery).
     const VulkanCreateHooks* vulkan_create_hooks = nullptr; // Vulkan only; null creates the instance and device directly.
 };
 
@@ -932,6 +933,24 @@ void barrier(CommandBuffer* commands, Stage before, Access before_access, Stage 
 // Ignored, leaving the destination unchanged, when timestamps are disabled or the queue lacks profiling support.
 // Destinations are ordinary CPU memory and must remain valid and distinct until read_timestamps retrieves the results.
 void write_timestamp(CommandBuffer* commands, uint64* cpu_destination, Stage stage = Stage::all_commands) noexcept;
+
+// What the GPU did between begin_pipeline_statistics and end_pipeline_statistics (Vulkan's pipeline statistics query). With
+// multiview the counts follow how the driver runs the work (NVIDIA 621.24: input primitives and vertex invocations once, clipping
+// primitives and fragment invocations per view).
+struct PipelineStatistics
+{
+    uint64 input_primitives = 0;
+    uint64 vertex_shader_invocations = 0;
+    uint64 clipping_primitives = 0; // Primitives that reached the clipper
+    uint64 fragment_shader_invocations = 0;
+    uint64 compute_shader_invocations = 0;
+};
+
+// Up to DeviceDesc::pipeline_statistics_query_count ranges per command buffer, begun and ended outside render passes, never nested.
+// Ignored, leaving the destination unchanged, when disabled, unsupported (Metal) or on a queue without graphics. Destinations are
+// ordinary CPU memory, valid and distinct until read_timestamps retrieves the results (it reads both kinds).
+void begin_pipeline_statistics(CommandBuffer* commands, PipelineStatistics* cpu_destination) noexcept;
+void end_pipeline_statistics(CommandBuffer* commands) noexcept;
 // Retrieve unread timestamps from submitted buffers after every submission from this pool completes. Does not wait.
 // Call before resetting the pool; reset discards unread results. Unsubmitted buffers are ignored.
 void read_timestamps(CommandPool* pool) noexcept;

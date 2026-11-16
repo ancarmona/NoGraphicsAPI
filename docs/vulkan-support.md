@@ -325,6 +325,14 @@ After every submission from a pool completes, call `read_timestamps(pool)` befor
 There are no timestamp GPU copies, resolve barriers, or additional waits. Destinations remain valid and distinct until retrieval.
 Unread results are discarded on pool reset; unsubmitted buffers are ignored. Markers are valid inside each rendering segment,
 but not between suspension and resumption. Multiply unsigned tick differences by `DeviceCaps::timestamp_period_ns` to obtain nanoseconds.
+
+`begin_pipeline_statistics(commands, cpu_destination)` and `end_pipeline_statistics(commands)` count a range of work into a
+`PipelineStatistics` (input primitives, vertex invocations, clipping primitives, fragment invocations, compute invocations).
+`DeviceDesc::pipeline_statistics_query_count` sets each command buffer's capacity (default 0: disabled, no pool); the device enables
+`pipelineStatisticsQuery` only then. Ranges begin and end outside rendering and do not nest; the calls are ignored, leaving the
+destination unchanged, when disabled, unsupported or on a queue without graphics. `read_timestamps(pool)` also writes these results.
+With multiview, NVIDIA 621.24 counts input primitives and vertex invocations once and clipping primitives and fragment invocations per
+view. An active range costs the work a little (a small render pass on an RTX 4090: 0.0596 to 0.0635 ms); Metal has no equivalent here.
 Timestamp storage follows command-pool reuse and destruction.
 
 Command buffers are one-shot recording handles allocated from explicit command pools. End each buffer
