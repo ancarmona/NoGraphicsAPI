@@ -15,6 +15,7 @@ constexpr uint32 pass_count = 4;
 constexpr uint32 samples_per_pass = msaa_test_size * msaa_test_size * msaa_test_samples;
 constexpr uint64 pass_bytes = uint64(samples_per_pass) * sizeof(MsaaSample);
 constexpr uint32 target_count = 4;
+constexpr uint64 root_stride = 256; // Satisfies DeviceCaps::root_alignment on every supported device
 
 struct Pass
 {
@@ -88,9 +89,9 @@ int main()
         return 77;
     }
 
-    const gpu::Span<byte> vertex = load_test_shader(NOGRAPHICSAPI_MSAA_VERTEX);
-    const gpu::Span<byte> fragment = load_test_shader(NOGRAPHICSAPI_MSAA_FRAGMENT);
-    const gpu::Span<byte> read = load_test_shader(NOGRAPHICSAPI_MSAA_READ);
+    const gpu::Span<byte> vertex = read_shader(NOGRAPHICSAPI_MSAA_VERTEX);
+    const gpu::Span<byte> fragment = read_shader(NOGRAPHICSAPI_MSAA_FRAGMENT);
+    const gpu::Span<byte> read = read_shader(NOGRAPHICSAPI_MSAA_READ);
     if (!vertex.data || !fragment.data || !read.data) return 1;
     const gpu::ColorTargetDesc color_targets[]{{.format = gpu::Format::rgba16_float}, {.format = gpu::Format::r32_uint},
                                                {.format = gpu::Format::rg32_uint}};
@@ -130,7 +131,7 @@ int main()
     }
     const gpu::TextureHeap texture_heap = gpu::create_texture_heap(device, heap_size);
     gpu::TextureDescriptorHeap* descriptors = gpu::create_texture_descriptor_heap(device, target_count);
-    const gpu::GpuHeap roots = gpu::create_gpu_heap(device, 512);
+    const gpu::GpuHeap roots = gpu::create_gpu_heap(device, pass_count * 2 * root_stride);
     const gpu::GpuHeap output = gpu::create_gpu_heap(device, pass_count * pass_bytes, gpu::MemoryType::gpu_only);
     const gpu::GpuHeap readback = gpu::create_gpu_heap(device, pass_count * pass_bytes, gpu::MemoryType::readback);
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(device);
@@ -163,20 +164,20 @@ int main()
             .id2_texture = 2,
             .depth_texture = 3,
         };
-        memcpy(roots.range.cpu + pass * 64, &draw_root, sizeof(draw_root));
-        memcpy(roots.range.cpu + pass * 64 + 32, &read_root, sizeof(read_root));
+        memcpy(roots.range.cpu + pass * 2 * root_stride, &draw_root, sizeof(draw_root));
+        memcpy(roots.range.cpu + (pass * 2 + 1) * root_stride, &read_root, sizeof(read_root));
         if (pass)
             gpu::barrier(commands, gpu::Stage::compute, gpu::Access::shader_read, gpu::Stage::depth_stencil_tests | gpu::Stage::color_output,
                          gpu::Access::depth_stencil_write | gpu::Access::color_write);
         gpu::begin_render_pass(commands, {.colors = colors, .depth = {.render_view = views[3], .load = gpu::LoadOp::clear, .clear = 1.0f}});
         if (passes[pass].depth_test) gpu::set_depth_stencil(commands, {.depth_test = true, .depth_write = true, .depth_compare = gpu::CompareOp::less});
         gpu::bind_pso(commands, draw_psos[passes[pass].alpha_to_coverage ? 1 : 0]);
-        gpu::draw(commands, roots.range.gpu + pass * 64, 6);
+        gpu::draw(commands, roots.range.gpu + pass * 2 * root_stride, 6);
         gpu::end_render_pass(commands);
         gpu::barrier(commands, gpu::Stage::depth_stencil_tests | gpu::Stage::color_output, gpu::Access::depth_stencil_write | gpu::Access::color_write,
                      gpu::Stage::compute, gpu::Access::shader_read);
         gpu::bind_pso(commands, read_pso);
-        gpu::dispatch(commands, roots.range.gpu + pass * 64 + 32, {.x = (msaa_test_size + 7) / 8, .y = (msaa_test_size + 7) / 8, .z = 1});
+        gpu::dispatch(commands, roots.range.gpu + (pass * 2 + 1) * root_stride, {.x = (msaa_test_size + 7) / 8, .y = (msaa_test_size + 7) / 8, .z = 1});
     }
     gpu::barrier(commands, gpu::Stage::compute, gpu::Access::shader_write, gpu::Stage::transfer, gpu::Access::transfer_read);
     gpu::copy_memory(commands, gpu::gpu_range(output), gpu::gpu_range(readback));

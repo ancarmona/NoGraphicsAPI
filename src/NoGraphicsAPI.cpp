@@ -23,6 +23,9 @@
 #if defined(_WIN32)
 #include <wchar.h>
 #endif
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <stdarg.h>
+#endif
 
 // Keep assert expressions type-checked in release without evaluating them.
 #if defined(NDEBUG)
@@ -740,6 +743,9 @@ struct Device
 {
     // NGA_PIPELINE_STATISTICS=1: each pipeline is created with CAPTURE_STATISTICS and its executables' statistics go to stderr
     bool pipeline_statistics = false;
+    // Driver workaround (docs/repro-queue-device-lost.md): with several queue families, queue submissions and presents take this lock
+    bool serialize_submissions = false;
+    uint32 submission_lock = 0;
     VkInstance instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
     PFN_vkDestroyDebugUtilsMessengerEXT destroy_debug_messenger = nullptr;
@@ -1486,6 +1492,7 @@ struct Texture
     TextureType type = TextureType::two_d;
     Format format = Format::rgba8_unorm;
     bool mutable_format = false;
+    bool srgb_views = false;
     bool external = false; // create_external_texture: the image belongs to someone else
 
     ~Texture()
@@ -2395,6 +2402,14 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
 #if defined(_WIN32)
         const wchar_t* value = _wgetenv(L"NGA_PIPELINE_STATISTICS");
         state->pipeline_statistics = value && value[0] == L'1';
+#endif
+    }
+    {
+        // NGA_SUBMIT_LOCK=0 turns the driver workaround off, to retest the driver
+        state->serialize_submissions = state->queue_family_count > 1;
+#if defined(_WIN32)
+        const wchar_t* value = _wgetenv(L"NGA_SUBMIT_LOCK");
+        if (value && value[0] == L'0') state->serialize_submissions = false;
 #endif
     }
     if (state->pipeline_statistics)
@@ -3392,6 +3407,7 @@ Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHe
         .type = desc.type,
         .format = desc.format,
         .mutable_format = desc.mutable_format,
+        .srgb_views = desc.srgb_views,
     };
     if (error_from_vk(vkCreateImage(device->device, &texture.image_info, nullptr, &result->image), "vkCreateImage") != Error::none)
     {
@@ -3426,6 +3442,7 @@ Texture* create_external_texture(Device* device, const TextureDesc& desc, void* 
         .type = desc.type,
         .format = desc.format,
         .mutable_format = desc.mutable_format,
+        .srgb_views = desc.srgb_views,
         .external = true,
     };
 }
@@ -3511,8 +3528,9 @@ RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc) noe
     if (width == 0) width = 1;
     if (height == 0) height = 1;
     const Format view_format = desc.format == Format::undefined ? texture->format : desc.format;
-    assert((view_format == texture->format || (texture->mutable_format && compatible_view_formats(texture->format, view_format))) &&
-           "a render view of another format needs a mutable_format texture and a compatible format");
+    assert((view_format == texture->format || (texture->mutable_format && compatible_view_formats(texture->format, view_format)) ||
+            (texture->srgb_views && view_format == srgb_view_pair(texture->format))) &&
+           "a render view of another format needs a mutable_format texture and a compatible format, or the sRGB/UNORM pair on srgb_views");
     RenderView* result = new RenderView{
         .state = texture->state,
         .width = width,
@@ -3878,6 +3896,17 @@ struct RasterTargets
 };
 
 // A line on stderr (Core's log in Surfbird: no fprintf there)
+#if defined(_MSC_VER) && !defined(__clang__)
+static void stat_line(const char* format, ...) noexcept
+{
+    char line[512];
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(line, sizeof(line), format, arguments);
+    va_end(arguments);
+    fputs(line, stderr);
+}
+#else
 static void stat_line(const char* format, ...) noexcept __attribute__((format(printf, 1, 2)));
 static void stat_line(const char* format, ...) noexcept
 {
@@ -3888,6 +3917,7 @@ static void stat_line(const char* format, ...) noexcept
     __builtin_va_end(arguments);
     fputs(line, stderr);
 }
+#endif
 
 // NGA_PIPELINE_STATISTICS=1: one line per executable statistic, "NGA_STAT <entry> <executable> <name> = <value>" on stderr
 static void report_pipeline_statistics(Device* device, VkPipeline pipeline, const char* entry) noexcept
@@ -4434,6 +4464,29 @@ void end_commands(CommandBuffer* commands) noexcept
 namespace
 {
 
+// Driver workaround (docs/repro-queue-device-lost.md): on NVIDIA (RTX 4090, drivers 596.99 to 621.24), two threads submitting to queues
+// of different families at the same time can lose the device. A device with several queue families takes this spin lock around each
+// queue submission and present; the GPU still runs the queues concurrently. Held for one driver call only.
+void lock_submissions(Device* device) noexcept
+{
+    if (!device->serialize_submissions) return;
+#if defined(_MSC_VER) && !defined(__clang__)
+    while (_InterlockedExchange(reinterpret_cast<volatile long*>(&device->submission_lock), 1)) _mm_pause();
+#else
+    while (__atomic_exchange_n(&device->submission_lock, 1u, __ATOMIC_ACQUIRE)) __builtin_ia32_pause();
+#endif
+}
+
+void unlock_submissions(Device* device) noexcept
+{
+    if (!device->serialize_submissions) return;
+#if defined(_MSC_VER) && !defined(__clang__)
+    _InterlockedExchange(reinterpret_cast<volatile long*>(&device->submission_lock), 0);
+#else
+    __atomic_store_n(&device->submission_lock, 0u, __ATOMIC_RELEASE);
+#endif
+}
+
 void submit_commands(Device* device, const SubmitDesc& desc, uint32 queue_index, VkSemaphore wait_semaphore, VkSemaphore signal_semaphore,
                      VkFence fence = VK_NULL_HANDLE) noexcept
 {
@@ -4537,7 +4590,10 @@ void submit_commands(Device* device, const SubmitDesc& desc, uint32 queue_index,
         .signalSemaphoreInfoCount = signal_count,
         .pSignalSemaphoreInfos = signal_infos,
     };
-    assert_vk(vkQueueSubmit2(queue->queue, 1, &submit_info, fence));
+    lock_submissions(device);
+    const VkResult submitted = vkQueueSubmit2(queue->queue, 1, &submit_info, fence);
+    unlock_submissions(device);
+    assert_vk(submitted);
     for (size_t index = 0; index < desc.commands.size; ++index) desc.commands.data[index]->submitted = true;
 }
 
@@ -4598,7 +4654,9 @@ void submit_and_present(Device* device, const SubmitDesc& desc) noexcept
         .pSwapchains = &swapchain->handle,
         .pImageIndices = &swapchain->image_index,
     };
+    lock_submissions(device);
     const VkResult result = vkQueuePresentKHR(device->queues[0].queue, &present_info);
+    unlock_submissions(device);
     present_context.present_pending = true;
     present_context.swapchain = swapchain->handle;
     swapchain->present_context = nullptr;

@@ -117,10 +117,10 @@ int main()
     if (!test_mesh) printf("Mesh multiview unavailable; testing vertex PSOs only.\n");
     if (!test_msaa) printf("4x MSAA unavailable; skipping the multisample case.\n");
 
-    const gpu::Span<byte> vertex = load_test_shader(NOGRAPHICSAPI_MULTIVIEW_VERTEX);
-    const gpu::Span<byte> mesh = load_test_shader(NOGRAPHICSAPI_MULTIVIEW_MESH);
-    const gpu::Span<byte> fragment = load_test_shader(NOGRAPHICSAPI_MULTIVIEW_FRAGMENT);
-    const gpu::Span<byte> read = load_test_shader(NOGRAPHICSAPI_MULTIVIEW_READ);
+    const gpu::Span<byte> vertex = read_shader(NOGRAPHICSAPI_MULTIVIEW_VERTEX);
+    const gpu::Span<byte> mesh = read_shader(NOGRAPHICSAPI_MULTIVIEW_MESH);
+    const gpu::Span<byte> fragment = read_shader(NOGRAPHICSAPI_MULTIVIEW_FRAGMENT);
+    const gpu::Span<byte> read = read_shader(NOGRAPHICSAPI_MULTIVIEW_READ);
     if (!vertex.data || !mesh.data || !fragment.data || !read.data) return 1;
     const gpu::ColorTargetDesc color_target{.format = gpu::Format::rgba8_unorm};
     gpu::PSO* vertex_pso = gpu::create_graphics_pso(device, {

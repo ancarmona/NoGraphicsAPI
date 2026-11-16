@@ -154,7 +154,7 @@ int main()
         .mutable_format = true,
         .usage = gpu::TextureUsage::color_attachment | gpu::TextureUsage::transfer_source,
     }, image);
-    gpu::RenderView* view = texture ? gpu::create_render_view(texture, {.layer_count = layers, .format = gpu::Format::rgba8_unorm}) : nullptr;
+    gpu::RenderView* view = texture ? gpu::create_render_view(texture, {.format = gpu::Format::rgba8_unorm, .layer_count = layers}) : nullptr;
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(device);
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     if (!texture || !view || !timeline || !pool)

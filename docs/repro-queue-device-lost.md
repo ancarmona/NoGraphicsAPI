@@ -79,5 +79,32 @@ tests once. Repeating the enabled `test_queue_family_threads` test still produce
 failures in Release; one passing suite does not rule out this intermittent issue.
 
 The failure does not require NoGraphicsAPI, device extensions, PushData, or timestamp resolution.
-The root cause is not vendor-confirmed, and the passing validation and sequential controls do not establish
-a workaround. No library behavior has been changed to hide the failure.
+The root cause is not vendor-confirmed.
+
+## Retested on 2026-11-16
+
+Windows, RTX 4090, NVIDIA 621.24, Vulkan SDK 1.4.357. `test_queue_family_threads` (the library's three-queue workers),
+MSVC builds, fresh process launches, without the workaround below:
+
+| Configuration | Observation |
+| --- | --- |
+| Release, all three workers | 2 failures and 2 hangs in 30 launches |
+| Debug, general and compute workers only | 9 `VK_ERROR_DEVICE_LOST` or `VK_NOT_READY` failures and 3 hangs in 40 |
+| Debug, any single worker; general and copy; compute and copy | 40 of 40 passed each |
+| Debug, general and compute, without timestamps; with buffer copies | still failing (9 and 6 in 40) |
+| Debug, general and compute, a test-side lock around recording and `submit` | 40 of 40 passed |
+| Debug, general and compute, a test-side lock around `submit` only | 60 of 60 passed |
+
+The failure needs two threads calling `vkQueueSubmit2` at the same time on queues of different families; the GPU work itself
+can overlap. A hung launch stays in the process list after `TerminateProcess` ("no running instance"): a thread waits in the
+driver, and the process goes only with a driver restart or a reboot. Do not run the unprotected configuration in a loop on a
+machine in use.
+
+## Workaround
+
+A device with several queue families serializes `vkQueueSubmit2` and `vkQueuePresentKHR` with a spin lock held for that call
+only (`lock_submissions` in the Vulkan backend). The queues still execute concurrently. `NGA_SUBMIT_LOCK=0` turns it off,
+to check whether a new driver fixes the failure; remove the workaround once it does.
+
+With the lock, Release `test_queue_family_threads`: 150 of 150 launches passed. Its cost, measured with the general and copy
+workers submitting back to back (the most contention): 13.9 µs per submission against 10.3 µs without the lock.

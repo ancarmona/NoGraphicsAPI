@@ -15,9 +15,9 @@ no intermediate timeline wait, passed 50 runs in each Debug/Release address-comm
 A timeline wait between separate upload and readback submissions works. The parallel texture and
 pitch-roundtrip tests retain this workaround. No driver-specific barrier widening is applied by the graphics API.
 
-## NVIDIA 617.14: core Vulkan 1.3 concurrent copies lose the device
+## NVIDIA 596.99 to 621.24: concurrent submissions to several queue families lose the device
 
-The failure observed on NVIDIA 596.99 persists on Windows with an RTX 4090 and NVIDIA 617.14.
+The failure observed on NVIDIA 596.99 persists on Windows with an RTX 4090 and NVIDIA 617.14 and 621.24.
 Buffer copies submitted to separate general, compute, and copy queues from three CPU threads
 intermittently return `VK_ERROR_DEVICE_LOST`.
 
@@ -31,8 +31,10 @@ Address copies also failed with and without synchronization validation. Core-cop
 sequential address-copy runs passed 50 repetitions each; these controls do not establish a workaround.
 
 This points to an NVIDIA driver issue independent of the library implementation, not a confirmed
-NoGraphicsAPI defect. The root cause is not vendor-confirmed, and no workaround is established.
-See the [standalone repro and test results](repro-queue-device-lost.md).
+NoGraphicsAPI defect. The root cause is not vendor-confirmed. The 2026-11-16 retest on 621.24 narrowed it: two threads calling
+`vkQueueSubmit2` at the same time on the general and compute families are enough, and a lock around that call alone stops it.
+The Vulkan backend now takes such a lock on devices with several queue families (`NGA_SUBMIT_LOCK=0` turns it off).
+See the [standalone repro, test results and workaround](repro-queue-device-lost.md).
 
 ## Metal 4 / macOS 26.6.2: render timestamps leave counter entries unwritten
 

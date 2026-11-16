@@ -47,7 +47,7 @@ VkResult enumerate_extensions(gpu::Span<const char* const> names, uint32* count,
     const uint32 written = *count < names.size ? *count : uint32(names.size);
     for (uint32 index = 0; index < written; ++index)
     {
-        values[index] = {};
+        values[index] = {.specVersion = 1};
         snprintf(values[index].extensionName, sizeof(values[index].extensionName), "%s", names.data[index]);
     }
     *count = written;

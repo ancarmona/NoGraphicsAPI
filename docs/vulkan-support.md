@@ -359,7 +359,9 @@ Each `(device, queue_index)` and command pool is externally synchronized, includ
 Distinct resource creation, immutable queries, timeline waits, and descriptor writes to disjoint slots
 can run concurrently on one device. Texture creation records its `UNDEFINED` to `GENERAL` transition
 in the supplied command buffer; every use must follow that initialization. Resource lifetime and
-mutable utility allocators remain caller-synchronized. No internal queue, pool, or device-wide locks are used.
+mutable utility allocators remain caller-synchronized. No internal queue or pool locks are used. One device-wide exception is a
+driver workaround: a device with several queue families serializes `vkQueueSubmit2` and `vkQueuePresentKHR` with a spin lock
+held for that call only ([repro](repro-queue-device-lost.md#workaround)); `NGA_SUBMIT_LOCK=0` turns it off to retest a driver.
 
 Public timeline semaphores are the application's reuse mechanism. Poll or wait for the point that
 last used mutable upload data, readback storage, a texture placement, indirect argument memory, or a
