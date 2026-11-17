@@ -29,6 +29,7 @@ conventional feature checked by device creation.
 | [`VK_KHR_device_address_commands`][address-commands] (optional) | Index, indirect, and copy commands consume GPU addresses directly. Otherwise addresses resolve to buffers and offsets. |
 | [`VK_KHR_unified_image_layouts`][unified-layouts] (optional) | Optimizes ordinary `GENERAL` image use; the public model is unchanged without it. |
 | [`VK_EXT_mesh_shader`][mesh-shader] | Required task and mesh shader support for direct and indirect workgroup draws. |
+| `VK_EXT_memory_budget` | Required. `get_memory_budget` sums the device-local heaps' budget and usage. Metal returns zeros. |
 | Buffer device address | Gives GPU heaps 64-bit shader addresses for their lifetime and enables typed pointer fields in shared structures. |
 | Vulkan 1.3 `synchronization2` and `dynamicRendering` | Resource-free barriers and rendering without render-pass or framebuffer objects. |
 | Vulkan 1.1 `multiview` | Required. Dynamic-rendering view masks render several array layers in one pass. `multiviewMeshShader` is enabled when available. |

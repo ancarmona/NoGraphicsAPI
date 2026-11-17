@@ -810,6 +810,16 @@ constexpr RenderingFlags operator|(RenderingFlags lhs, RenderingFlags rhs) noexc
 [[nodiscard]] DeviceInit create_device(const DeviceDesc& desc = {}) noexcept;
 void destroy_device(Device* device) noexcept;
 [[nodiscard]] const DeviceCaps& get_device_caps(const Device* device) noexcept;
+
+// The device-local memory the OS lets this process use now, and the process's use of it, in bytes, summed over the device-local
+// heaps (Vulkan: VK_EXT_memory_budget). The budget moves while running (other applications): read it about once a frame or a second.
+struct MemoryBudget
+{
+    uint64 budget = 0;
+    uint64 usage = 0;
+};
+
+[[nodiscard]] MemoryBudget get_memory_budget(const Device* device) noexcept;
 // Vulkan: the device's native objects and the queue_index queue's family and index; empty on Metal.
 [[nodiscard]] VulkanHandles get_vulkan_handles(const Device* device, uint32 queue_index = 0) noexcept;
 [[nodiscard]] bool supports_texture_format(const Device* device, Format format, TextureUsage usage) noexcept;

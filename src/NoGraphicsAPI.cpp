@@ -1752,6 +1752,8 @@ Error inspect_candidate(VkPhysicalDevice physical_device, VkSurfaceKHR surface, 
         if (!has_name({extensions, extension_count}, required_extensions[index]))
             output.missing_extensions[output.missing_extension_count++] = required_extensions[index];
     }
+    if (!has_name({extensions, extension_count}, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME))
+        output.missing_extensions[output.missing_extension_count++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
     const bool khr_swapchain_maintenance1 = khr_surface_maintenance1 &&
                                             has_name({extensions, extension_count}, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
     const bool ext_swapchain_maintenance1 = ext_surface_maintenance1 &&
@@ -2342,7 +2344,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         };
         first_queue += queue_counts[type];
     }
-    const char* enabled_device_extensions[17]{};
+    const char* enabled_device_extensions[18]{};
     uint32 enabled_device_extension_count = 0;
     // Calibrated timestamps, to put GPU timestamps on the CPU clock; optional
     const char* calibrated_extension = nullptr;
@@ -2369,6 +2371,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME;
     }
     enabled_device_extensions[enabled_device_extension_count++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
+    enabled_device_extensions[enabled_device_extension_count++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
     if (selected.ray_query)
     {
         enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
@@ -4684,6 +4687,24 @@ const DeviceCaps& get_device_caps(const Device* device) noexcept
 {
     assert(device && "get_device_caps called with a null device");
     return device->caps;
+}
+
+MemoryBudget get_memory_budget(const Device* device) noexcept
+{
+    assert(device);
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT heaps{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, .pNext = &heaps};
+    vkGetPhysicalDeviceMemoryProperties2(device->physical_device, &properties);
+    MemoryBudget result{};
+    for (uint32 heap = 0; heap < properties.memoryProperties.memoryHeapCount; ++heap)
+    {
+        if (properties.memoryProperties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+        {
+            result.budget += heaps.heapBudget[heap];
+            result.usage += heaps.heapUsage[heap];
+        }
+    }
+    return result;
 }
 
 VulkanHandles get_vulkan_handles(const Device* device, uint32 queue_index) noexcept

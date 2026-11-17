@@ -129,6 +129,7 @@ Vulkan 1.4 alone is insufficient. Required extensions include:
 
 - [`VK_EXT_descriptor_heap`][descriptor-heap] with `VK_KHR_shader_untyped_pointers`, or `VK_EXT_descriptor_buffer` — application-owned descriptor storage.
 - [`VK_EXT_mesh_shader`][mesh-shader] — task and mesh shaders.
+- `VK_EXT_memory_budget` — `get_memory_budget`: the device-local memory the OS lets the process use, and its use.
 
 [`VK_KHR_device_address_commands`][address-commands] is optional: without it, command addresses resolve to backing buffers and offsets.
 [`VK_KHR_unified_image_layouts`][unified-layouts] is optional and makes the backend's common image layout efficient.
