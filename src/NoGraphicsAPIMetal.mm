@@ -753,6 +753,7 @@ void destroy_device(Device* device) noexcept
 
 const DeviceCaps& get_device_caps(const Device* device) noexcept { return device->caps; }
 MemoryBudget get_memory_budget(const Device*) noexcept { return {}; }
+PipelineStats get_pipeline_stats(const Device*) noexcept { return {}; }
 VulkanHandles get_vulkan_handles(const Device*, uint32) noexcept { return {}; }
 bool get_calibrated_timestamps(Device*, CalibratedTimestamps& out) noexcept { out = {}; return false; }
 void begin_debug_label(CommandBuffer*, const char*) noexcept {}

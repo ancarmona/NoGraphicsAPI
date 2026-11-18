@@ -746,6 +746,9 @@ struct Device
     // Driver workaround (docs/repro-queue-device-lost.md): with several queue families, queue submissions and presents take this lock
     bool serialize_submissions = false;
     uint32 submission_lock = 0;
+    // get_pipeline_stats: the PSOs created and the driver's creation nanoseconds (atomic adds: creation may be concurrent)
+    uint64 pipelines_created = 0;
+    uint64 pipeline_create_ns = 0;
     VkInstance instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
     PFN_vkDestroyDebugUtilsMessengerEXT destroy_debug_messenger = nullptr;
@@ -3922,6 +3925,19 @@ static void stat_line(const char* format, ...) noexcept
 }
 #endif
 
+// One PSO created (get_pipeline_stats), with the driver's creation feedback (Vulkan 1.3): its duration when the driver gave one
+static void count_pipeline(Device* device, const VkPipelineCreationFeedback& feedback) noexcept
+{
+    const uint64 elapsed = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT) ? feedback.duration : 0;
+#if defined(_MSC_VER) && !defined(__clang__)
+    _InterlockedExchangeAdd64(reinterpret_cast<volatile long long*>(&device->pipelines_created), 1);
+    _InterlockedExchangeAdd64(reinterpret_cast<volatile long long*>(&device->pipeline_create_ns), static_cast<long long>(elapsed));
+#else
+    __atomic_add_fetch(&device->pipelines_created, 1ull, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&device->pipeline_create_ns, elapsed, __ATOMIC_RELAXED);
+#endif
+}
+
 // NGA_PIPELINE_STATISTICS=1: one line per executable statistic, "NGA_STAT <entry> <executable> <name> = <value>" on stderr
 static void report_pipeline_statistics(Device* device, VkPipeline pipeline, const char* entry) noexcept
 {
@@ -4116,9 +4132,15 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
         .flags = (device->descriptor_heap ? VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT : VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT) |
                  (device->pipeline_statistics ? VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR : 0),
     };
+    VkPipelineCreationFeedback feedback{};
+    const VkPipelineCreationFeedbackCreateInfo feedback_info{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
+        .pNext = &flags_info,
+        .pPipelineCreationFeedback = &feedback,
+    };
     const VkGraphicsPipelineCreateInfo pso_info{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = &flags_info,
+        .pNext = &feedback_info,
         .stageCount = 1u + (task.code.size ? 1u : 0u) + (fragment.code.size ? 1u : 0u),
         .pStages = stages + (task.code.size ? 0u : 1u),
         .pVertexInputState = mesh ? nullptr : &vertex_input,
@@ -4141,6 +4163,7 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
         delete result;
         return nullptr;
     }
+    count_pipeline(device, feedback);
     report_pipeline_statistics(device, result->pso, fragment.code.size ? fragment.entry_point : first_stage.entry_point);
     return result;
 }
@@ -4191,9 +4214,15 @@ PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept
         .flags = (device->descriptor_heap ? VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT : VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT) |
                  (device->pipeline_statistics ? VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR : 0),
     };
+    VkPipelineCreationFeedback feedback{};
+    const VkPipelineCreationFeedbackCreateInfo feedback_info{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
+        .pNext = &flags_info,
+        .pPipelineCreationFeedback = &feedback,
+    };
     const VkComputePipelineCreateInfo pso_info{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .pNext = &flags_info,
+        .pNext = &feedback_info,
         .stage = stage,
         .layout = device->pipeline_layout,
         .basePipelineIndex = -1,
@@ -4207,6 +4236,7 @@ PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept
         delete result;
         return nullptr;
     }
+    count_pipeline(device, feedback);
     report_pipeline_statistics(device, result->pso, compute.entry_point);
     return result;
 }
@@ -4687,6 +4717,18 @@ const DeviceCaps& get_device_caps(const Device* device) noexcept
 {
     assert(device && "get_device_caps called with a null device");
     return device->caps;
+}
+
+PipelineStats get_pipeline_stats(const Device* device) noexcept
+{
+    assert(device && "get_pipeline_stats called with a null device");
+#if defined(_MSC_VER) && !defined(__clang__)
+    return {.created = static_cast<uint64>(_InterlockedOr64(reinterpret_cast<volatile long long*>(const_cast<uint64*>(&device->pipelines_created)), 0)),
+            .create_ns = static_cast<uint64>(_InterlockedOr64(reinterpret_cast<volatile long long*>(const_cast<uint64*>(&device->pipeline_create_ns)), 0))};
+#else
+    return {.created = __atomic_load_n(&device->pipelines_created, __ATOMIC_RELAXED),
+            .create_ns = __atomic_load_n(&device->pipeline_create_ns, __ATOMIC_RELAXED)};
+#endif
 }
 
 MemoryBudget get_memory_budget(const Device* device) noexcept

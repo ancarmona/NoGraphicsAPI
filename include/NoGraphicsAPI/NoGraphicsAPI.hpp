@@ -820,6 +820,16 @@ struct MemoryBudget
 };
 
 [[nodiscard]] MemoryBudget get_memory_budget(const Device* device) noexcept;
+
+// The PSOs this device has created so far, and the time the driver reports for their creation (Vulkan: the pipeline creation
+// feedback, 0 when the driver gives none), in nanoseconds: a program can check that it creates none after its load. Safe to read while
+// other threads create PSOs.
+struct PipelineStats
+{
+    uint64 created = 0;
+    uint64 create_ns = 0;
+};
+[[nodiscard]] PipelineStats get_pipeline_stats(const Device* device) noexcept;
 // Vulkan: the device's native objects and the queue_index queue's family and index; empty on Metal.
 [[nodiscard]] VulkanHandles get_vulkan_handles(const Device* device, uint32 queue_index = 0) noexcept;
 [[nodiscard]] bool supports_texture_format(const Device* device, Format format, TextureUsage usage) noexcept;
