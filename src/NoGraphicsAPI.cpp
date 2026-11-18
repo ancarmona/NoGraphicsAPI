@@ -789,6 +789,14 @@ struct Device
     // VK_EXT_debug_utils command labels, for tools (Nsight, RenderDoc); null without the extension
     PFN_vkCmdBeginDebugUtilsLabelEXT cmd_begin_label = nullptr;
     PFN_vkCmdEndDebugUtilsLabelEXT cmd_end_label = nullptr;
+    // VK_NV_device_diagnostic_checkpoints (NGA_CHECKPOINTS=0 turns it off): each debug label's begin also sets a checkpoint whose marker
+    // is its name's index here plus one; on a lost device the last checkpoints each queue reached are reported (the pass the GPU hung in)
+    PFN_vkCmdSetCheckpointNV cmd_set_checkpoint = nullptr;
+    PFN_vkGetQueueCheckpointDataNV get_checkpoint_data = nullptr;
+    static constexpr uint32 checkpoint_name_capacity = 256;
+    static constexpr uint32 checkpoint_name_bytes = 64;
+    char checkpoint_names[checkpoint_name_capacity][checkpoint_name_bytes]{};
+    uint32 checkpoint_name_count = 0;
     DeviceCaps caps;
     VkFormatFeatureFlags2 format_features[format_count]{};
     bool texture_compression_etc2 = false;
@@ -2353,12 +2361,14 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     uint32 enabled_device_extension_count = 0;
     // Calibrated timestamps, to put GPU timestamps on the CPU clock; optional
     const char* calibrated_extension = nullptr;
+    bool checkpoints_extension = false;
     {
         uint32 count = 0;
         vkEnumerateDeviceExtensionProperties(state->physical_device, nullptr, &count, nullptr);
         VkExtensionProperties* properties = static_cast<VkExtensionProperties*>(malloc(sizeof(VkExtensionProperties) * (count ? count : 1)));
         if (properties && vkEnumerateDeviceExtensionProperties(state->physical_device, nullptr, &count, properties) == VK_SUCCESS)
         {
+            checkpoints_extension = has_name({properties, count}, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
             if (has_name({properties, count}, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME))
                 calibrated_extension = VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
             else if (has_name({properties, count}, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME))
@@ -2422,6 +2432,14 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     }
     if (state->pipeline_statistics)
         enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
+    {
+#if defined(_WIN32)
+        const wchar_t* value = _wgetenv(L"NGA_CHECKPOINTS");
+        if (value && value[0] == L'0') checkpoints_extension = false;
+#endif
+    }
+    if (checkpoints_extension)
+        enabled_device_extensions[enabled_device_extension_count++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
     const VkDeviceCreateInfo device_info{
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = state->pipeline_statistics ? static_cast<const void*>(&executable_features) : static_cast<const void*>(&enabled_features.core),
@@ -2477,6 +2495,16 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         }
         if (!device_domain || state->host_time_domain == VK_TIME_DOMAIN_DEVICE_KHR)
             state->get_calibrated_timestamps = nullptr;
+    }
+    if (checkpoints_extension)
+    {
+        state->cmd_set_checkpoint = load_device_proc<PFN_vkCmdSetCheckpointNV>(state->device, "vkCmdSetCheckpointNV");
+        state->get_checkpoint_data = load_device_proc<PFN_vkGetQueueCheckpointDataNV>(state->device, "vkGetQueueCheckpointDataNV");
+        if (!state->cmd_set_checkpoint || !state->get_checkpoint_data)
+        {
+            state->cmd_set_checkpoint = nullptr;
+            state->get_checkpoint_data = nullptr;
+        }
     }
     if (debug_labels_available)
     {
@@ -2692,6 +2720,58 @@ void signal_timeline(TimelinePoint point) noexcept
     assert_vk(vkSignalSemaphore(point.semaphore->state->device, &signal));
 }
 
+namespace
+{
+
+const char* checkpoint_stage_name(VkPipelineStageFlagBits stage) noexcept
+{
+    switch (stage)
+    {
+    case VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: return "started (top of pipe)";
+    case VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: return "finished before it (bottom of pipe)";
+    default: return "another stage";
+    }
+}
+
+// A lost device, in every build (assert_vk is silent in release builds): the last checkpoints each queue reached (the debug labels'
+// begins, VK_NV_device_diagnostic_checkpoints), then the fatal report and abort; other failures keep assert_vk's behavior
+void check_device_result(Device* device, VkResult result, const char* operation) noexcept
+{
+    if (result != VK_ERROR_DEVICE_LOST)
+    {
+        assert_vk(result);
+        return;
+    }
+    if (error_callback && device->get_checkpoint_data)
+    {
+        for (uint32 queue_index = 0; queue_index < device->queue_count; ++queue_index)
+        {
+            VkCheckpointDataNV checkpoints[16];
+            for (VkCheckpointDataNV& checkpoint : checkpoints) checkpoint = {.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV};
+            uint32 count = 16;
+            device->get_checkpoint_data(device->queues[queue_index].queue, &count, checkpoints);
+            for (uint32 index = 0; index < count; ++index)
+            {
+                const uintptr_t marker = reinterpret_cast<uintptr_t>(checkpoints[index].pCheckpointMarker);
+                const char* name = marker >= 1 && marker <= device->checkpoint_name_count ? device->checkpoint_names[marker - 1] : "(none)";
+                char message[256];
+                snprintf(message, sizeof(message), "lost device, queue %u: the last checkpoint %s: %s", queue_index,
+                         checkpoint_stage_name(checkpoints[index].stage), name);
+                error_callback(message, false);
+            }
+            if (count == 0)
+            {
+                char message[128];
+                snprintf(message, sizeof(message), "lost device, queue %u: no checkpoint data", queue_index);
+                error_callback(message, false);
+            }
+        }
+    }
+    abort_vk_failure(result, operation);
+}
+
+} // namespace
+
 void wait_timeline(TimelinePoint point) noexcept
 {
     TimelineSemaphore* semaphore = point.semaphore;
@@ -2704,10 +2784,7 @@ void wait_timeline(TimelinePoint point) noexcept
         .pSemaphores = &handle,
         .pValues = &point.value,
     };
-    assert_vk(vkWaitSemaphores(
-        semaphore->state->device,
-        &wait_info,
-        ~uint64{0}));
+    check_device_result(semaphore->state, vkWaitSemaphores(semaphore->state->device, &wait_info, ~uint64{0}), "vkWaitSemaphores");
 }
 
 void write_timestamp(CommandBuffer* commands, uint64* cpu_destination, Stage stage) noexcept
@@ -4352,9 +4429,25 @@ bool get_calibrated_timestamps(Device* device, CalibratedTimestamps& out) noexce
 
 void begin_debug_label(CommandBuffer* commands, const char* name) noexcept
 {
-    if (!commands->state->cmd_begin_label) return;
+    Device* device = commands->state;
+    if (device->cmd_set_checkpoint && name)
+    {
+        // The name's index (interned once; recording is on one thread a device); past the capacity, the last slot stands for the rest
+        uint32 index = 0;
+        while (index < device->checkpoint_name_count && strncmp(device->checkpoint_names[index], name, Device::checkpoint_name_bytes - 1) != 0)
+            ++index;
+        if (index == device->checkpoint_name_count && index < Device::checkpoint_name_capacity)
+        {
+            for (uint32 byte = 0; byte < Device::checkpoint_name_bytes - 1 && name[byte]; ++byte)
+                device->checkpoint_names[index][byte] = name[byte];
+            ++device->checkpoint_name_count;
+        }
+        if (index >= Device::checkpoint_name_capacity) index = Device::checkpoint_name_capacity - 1;
+        device->cmd_set_checkpoint(commands->command_buffer, reinterpret_cast<void*>(static_cast<uintptr_t>(index + 1)));
+    }
+    if (!device->cmd_begin_label) return;
     const VkDebugUtilsLabelEXT label{.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, .pLabelName = name};
-    commands->state->cmd_begin_label(commands->command_buffer, &label);
+    device->cmd_begin_label(commands->command_buffer, &label);
 }
 
 void end_debug_label(CommandBuffer* commands) noexcept
@@ -4628,7 +4721,7 @@ void submit_commands(Device* device, const SubmitDesc& desc, uint32 queue_index,
     lock_submissions(device);
     const VkResult submitted = vkQueueSubmit2(queue->queue, 1, &submit_info, fence);
     unlock_submissions(device);
-    assert_vk(submitted);
+    check_device_result(device, submitted, "vkQueueSubmit2");
     for (size_t index = 0; index < desc.commands.size; ++index) desc.commands.data[index]->submitted = true;
 }
 
@@ -4692,6 +4785,7 @@ void submit_and_present(Device* device, const SubmitDesc& desc) noexcept
     lock_submissions(device);
     const VkResult result = vkQueuePresentKHR(device->queues[0].queue, &present_info);
     unlock_submissions(device);
+    if (result == VK_ERROR_DEVICE_LOST) check_device_result(device, result, "vkQueuePresentKHR");
     present_context.present_pending = true;
     present_context.swapchain = swapchain->handle;
     swapchain->present_context = nullptr;
