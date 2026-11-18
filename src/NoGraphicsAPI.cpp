@@ -255,6 +255,7 @@ VkFormat to_vk(Format format)
     case Format::astc_4x4_unorm: return VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
     case Format::bc3_srgb: return VK_FORMAT_BC3_SRGB_BLOCK;
     case Format::bc3_unorm: return VK_FORMAT_BC3_UNORM_BLOCK;
+    case Format::bc1_srgb: return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
     case Format::bc4_r: return VK_FORMAT_BC4_UNORM_BLOCK;
     case Format::bc5_rg: return VK_FORMAT_BC5_UNORM_BLOCK;
     case Format::bc6h_ufloat: return VK_FORMAT_BC6H_UFLOAT_BLOCK;
@@ -385,6 +386,7 @@ TextureCompression texture_compression(Format format) noexcept
     {
     case Format::bc3_srgb:
     case Format::bc3_unorm:
+    case Format::bc1_srgb:
     case Format::bc4_r:
     case Format::bc5_rg:
     case Format::bc6h_ufloat:
