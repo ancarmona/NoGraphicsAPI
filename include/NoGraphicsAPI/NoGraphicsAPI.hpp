@@ -1072,10 +1072,24 @@ struct AccelerationStructureInstance
     uint64 acceleration_structure = 0;
 };
 
+// Bottom level: triangles, float3 positions every vertex_stride bytes (4-byte aligned) and uint32 indices, three a triangle. A ray
+// query commits an opaque triangle itself (no candidate step); its index is CommittedPrimitiveIndex(), its side
+// CommittedTriangleFrontFace() (counter-clockwise front, in the instance's space).
+struct AccelerationStructureTriangles
+{
+    GpuRange vertices = {};
+    uint32 vertex_count = 0;
+    uint32 vertex_stride = 12;
+    GpuRange indices = {};
+    uint32 triangle_count = 0;
+    bool opaque = true;
+};
+
 struct AccelerationStructureDesc
 {
     AccelerationStructureType type = AccelerationStructureType::bottom_level;
-    AccelerationStructureAabbs aabbs = {}; // bottom_level
+    AccelerationStructureAabbs aabbs = {}; // bottom_level, when triangles.triangle_count is 0
+    AccelerationStructureTriangles triangles = {}; // bottom_level, in place of aabbs when triangle_count > 0
     GpuRange instances = {};               // top_level: AccelerationStructureInstance records, 16-byte aligned
     uint32 instance_count = 0;
     bool fast_build = false;               // Prefer build speed over trace speed (a structure rebuilt every frame).

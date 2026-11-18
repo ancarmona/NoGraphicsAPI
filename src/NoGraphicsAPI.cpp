@@ -5400,7 +5400,22 @@ struct AccelerationStructureBuildInfo
 
     explicit AccelerationStructureBuildInfo(const AccelerationStructureDesc& desc) noexcept
     {
-        if (desc.type == AccelerationStructureType::bottom_level)
+        if (desc.type == AccelerationStructureType::bottom_level && desc.triangles.triangle_count > 0)
+        {
+            geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+            geometry.geometry.triangles = {
+                .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+                .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT,
+                .vertexData = {.deviceAddress = reinterpret_cast<VkDeviceAddress>(desc.triangles.vertices.gpu)},
+                .vertexStride = desc.triangles.vertex_stride,
+                .maxVertex = desc.triangles.vertex_count > 0 ? desc.triangles.vertex_count - 1 : 0,
+                .indexType = VK_INDEX_TYPE_UINT32,
+                .indexData = {.deviceAddress = reinterpret_cast<VkDeviceAddress>(desc.triangles.indices.gpu)},
+            };
+            geometry.flags = desc.triangles.opaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
+            primitive_count = desc.triangles.triangle_count;
+        }
+        else if (desc.type == AccelerationStructureType::bottom_level)
         {
             geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
             geometry.geometry.aabbs = {
@@ -5498,6 +5513,8 @@ void build_acceleration_structure(CommandBuffer* commands, AccelerationStructure
 {
     assert(commands->state->caps.ray_query);
     assert(commands->state->scratch_alignment == 0 || reinterpret_cast<uintptr>(scratch.gpu) % commands->state->scratch_alignment == 0);
+    // The barriers recorded before the build (its inputs' copy, a bottom level a top level reads) apply before it
+    flush_barriers(commands);
     AccelerationStructureBuildInfo info(desc);
     info.build.dstAccelerationStructure = destination->handle;
     info.build.scratchData.deviceAddress = reinterpret_cast<VkDeviceAddress>(scratch.gpu);
