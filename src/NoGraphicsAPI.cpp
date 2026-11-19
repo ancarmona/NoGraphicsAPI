@@ -40,6 +40,9 @@ namespace
 {
 
 thread_local ErrorCallback error_callback = nullptr;
+// set_device_lost_callback's: any thread may lose the device, so it is not thread-local; called once
+DeviceLostCallback device_lost_callback = nullptr;
+bool device_lost_called = false;
 
 constexpr uint32 max_device_extensions = 512;
 constexpr uint32 max_instance_extensions = 256;
@@ -95,6 +98,9 @@ void report_vk_failure(VkResult result, const char* operation, bool fatal, uint6
 [[noreturn]] void abort_vk_failure(VkResult result, const char* operation, uint64 byte_count = 0) noexcept
 {
     report_vk_failure(result, operation, true, byte_count);
+    // The application's wait for its GPU crash dump (set_device_lost_callback), once, before the abort
+    if (result == VK_ERROR_DEVICE_LOST && device_lost_callback && !__atomic_exchange_n(&device_lost_called, true, __ATOMIC_SEQ_CST))
+        device_lost_callback();
     assert(result == VK_SUCCESS && "unexpected Vulkan failure");
     abort();
 }
@@ -2056,6 +2062,11 @@ void set_error_callback(ErrorCallback callback) noexcept
     error_callback = callback;
 }
 
+void set_device_lost_callback(DeviceLostCallback callback) noexcept
+{
+    device_lost_callback = callback;
+}
+
 DeviceInit create_device(const DeviceDesc& desc) noexcept
 {
     assert(desc.desired_queue_count != 0 && "create_device requires at least one queue");
@@ -2357,11 +2368,12 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         };
         first_queue += queue_counts[type];
     }
-    const char* enabled_device_extensions[18]{};
+    const char* enabled_device_extensions[20]{};
     uint32 enabled_device_extension_count = 0;
     // Calibrated timestamps, to put GPU timestamps on the CPU clock; optional
     const char* calibrated_extension = nullptr;
     bool checkpoints_extension = false;
+    bool diagnostics_config_extension = false; // DeviceDesc::gpu_crash_dumps
     {
         uint32 count = 0;
         vkEnumerateDeviceExtensionProperties(state->physical_device, nullptr, &count, nullptr);
@@ -2369,6 +2381,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         if (properties && vkEnumerateDeviceExtensionProperties(state->physical_device, nullptr, &count, properties) == VK_SUCCESS)
         {
             checkpoints_extension = has_name({properties, count}, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+            diagnostics_config_extension = desc.gpu_crash_dumps && has_name({properties, count}, VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
             if (has_name({properties, count}, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME))
                 calibrated_extension = VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
             else if (has_name({properties, count}, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME))
@@ -2440,9 +2453,19 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     }
     if (checkpoints_extension)
         enabled_device_extensions[enabled_device_extension_count++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+    // GPU crash dumps (DeviceDesc::gpu_crash_dumps, the application's Aftermath on): the driver's data for them
+    if (diagnostics_config_extension)
+        enabled_device_extensions[enabled_device_extension_count++] = VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME;
+    const VkDeviceDiagnosticsConfigCreateInfoNV diagnostics_config{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV,
+        .pNext = state->pipeline_statistics ? static_cast<const void*>(&executable_features) : static_cast<const void*>(&enabled_features.core),
+        .flags = VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV |
+                 VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_ERROR_REPORTING_BIT_NV,
+    };
     const VkDeviceCreateInfo device_info{
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = state->pipeline_statistics ? static_cast<const void*>(&executable_features) : static_cast<const void*>(&enabled_features.core),
+        .pNext = diagnostics_config_extension ? static_cast<const void*>(&diagnostics_config)
+            : state->pipeline_statistics ? static_cast<const void*>(&executable_features) : static_cast<const void*>(&enabled_features.core),
         .queueCreateInfoCount = state->queue_family_count,
         .pQueueCreateInfos = queue_infos,
         .enabledExtensionCount = enabled_device_extension_count,

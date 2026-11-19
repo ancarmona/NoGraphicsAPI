@@ -162,6 +162,11 @@ void set_error_callback(ErrorCallback callback) noexcept
     error_callback = callback;
 }
 
+void set_device_lost_callback(DeviceLostCallback) noexcept
+{
+    // Metal has no lost device report here yet: never called
+}
+
 struct GpuHeapOwner
 {
     Device* device = nullptr;

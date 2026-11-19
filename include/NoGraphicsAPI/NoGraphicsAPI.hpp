@@ -46,6 +46,11 @@ using ErrorCallback = void (*)(const char* message, bool fatal) noexcept;
 // The thread-local callback defaults to nullptr. Fatal execution errors still abort after the callback returns.
 void set_error_callback(ErrorCallback callback) noexcept;
 
+// Called once on a lost device, before the process aborts (after the error callback's report): the application waits there for its
+// GPU crash dump to be written (DeviceDesc::gpu_crash_dumps). Null: none. Any thread.
+using DeviceLostCallback = void (*)() noexcept;
+void set_device_lost_callback(DeviceLostCallback callback) noexcept;
+
 enum class MemoryType : uint8
 {
     cpu_visible,
@@ -548,6 +553,10 @@ struct DeviceDesc
     uint32 timestamp_query_count = 256; // Per command buffer; zero disables timestamps.
     uint32 pipeline_statistics_query_count = 0; // Per command buffer; zero disables pipeline statistics (Vulkan's pipelineStatisticsQuery).
     const VulkanCreateHooks* vulkan_create_hooks = nullptr; // Vulkan only; null creates the instance and device directly.
+    // GPU crash dumps (NVIDIA Nsight Aftermath, turned on by the application before this call): the device asks the driver for the
+    // dumps' data (Vulkan: VK_NV_device_diagnostics_config with automatic checkpoints, resource tracking, shader debug information
+    // and shader error reporting) when the driver has it.
+    bool gpu_crash_dumps = false;
 };
 
 // The native objects of a Vulkan device, for interop (OpenXR's XrGraphicsBindingVulkan2KHR). Null on Metal.
