@@ -801,8 +801,11 @@ struct Device
     PFN_vkGetQueueCheckpointDataNV get_checkpoint_data = nullptr;
     static constexpr uint32 checkpoint_name_capacity = 256;
     static constexpr uint32 checkpoint_name_bytes = 64;
+    // Pools record concurrently: the names below checkpoint_name_count (published with a release store) are whole; a new name is
+    // written under checkpoint_name_lock (begin_debug_label)
     char checkpoint_names[checkpoint_name_capacity][checkpoint_name_bytes]{};
     uint32 checkpoint_name_count = 0;
+    uint32 checkpoint_name_lock = 0;
     DeviceCaps caps;
     VkFormatFeatureFlags2 format_features[format_count]{};
     bool texture_compression_etc2 = false;
@@ -1259,6 +1262,16 @@ const char* checkpoint_stage_name(VkPipelineStageFlagBits stage) noexcept
     }
 }
 
+// The checkpoint names published so far (acquire: each name below the count is whole)
+uint32 published_checkpoint_names(const Device* device) noexcept
+{
+#if defined(_MSC_VER) && !defined(__clang__)
+    return static_cast<uint32>(_InterlockedOr(reinterpret_cast<volatile long*>(const_cast<uint32*>(&device->checkpoint_name_count)), 0));
+#else
+    return __atomic_load_n(&device->checkpoint_name_count, __ATOMIC_ACQUIRE);
+#endif
+}
+
 // A lost device, in every build (assert_vk is silent in release builds): the last checkpoints each queue reached (the debug labels'
 // begins, VK_NV_device_diagnostic_checkpoints), then the fatal report and abort; other failures keep assert_vk's behavior. Every
 // submission, present and wait of the backend checks its result here
@@ -1280,7 +1293,7 @@ void check_device_result(Device* device, VkResult result, const char* operation)
             for (uint32 index = 0; index < count; ++index)
             {
                 const uintptr_t marker = reinterpret_cast<uintptr_t>(checkpoints[index].pCheckpointMarker);
-                const char* name = marker >= 1 && marker <= device->checkpoint_name_count ? device->checkpoint_names[marker - 1] : "(none)";
+                const char* name = marker >= 1 && marker <= published_checkpoint_names(device) ? device->checkpoint_names[marker - 1] : "(none)";
                 char message[256];
                 snprintf(message, sizeof(message), "lost device, queue %u: the last checkpoint %s: %s", queue_index,
                          checkpoint_stage_name(checkpoints[index].stage), name);
@@ -4449,21 +4462,52 @@ bool get_calibrated_timestamps(Device* device, CalibratedTimestamps& out) noexce
     return true;
 }
 
+namespace
+{
+
+// A name not among the first `searched` published ones: under the names' lock (held for this insert only, once per new name and
+// device), looked for again past the names published meanwhile, else written and published with the count (release)
+uint32 intern_checkpoint_name(Device* device, const char* name, uint32 searched) noexcept
+{
+#if defined(_MSC_VER) && !defined(__clang__)
+    while (_InterlockedExchange(reinterpret_cast<volatile long*>(&device->checkpoint_name_lock), 1)) _mm_pause();
+#else
+    while (__atomic_exchange_n(&device->checkpoint_name_lock, 1u, __ATOMIC_ACQUIRE)) __builtin_ia32_pause();
+#endif
+    const uint32 count = device->checkpoint_name_count;
+    uint32 index = searched;
+    while (index < count && strncmp(device->checkpoint_names[index], name, Device::checkpoint_name_bytes - 1) != 0) ++index;
+    if (index == count && count < Device::checkpoint_name_capacity)
+    {
+        for (uint32 byte = 0; byte < Device::checkpoint_name_bytes - 1 && name[byte]; ++byte)
+            device->checkpoint_names[index][byte] = name[byte];
+#if defined(_MSC_VER) && !defined(__clang__)
+        _InterlockedExchange(reinterpret_cast<volatile long*>(&device->checkpoint_name_count), static_cast<long>(count + 1));
+#else
+        __atomic_store_n(&device->checkpoint_name_count, count + 1, __ATOMIC_RELEASE);
+#endif
+    }
+#if defined(_MSC_VER) && !defined(__clang__)
+    _InterlockedExchange(reinterpret_cast<volatile long*>(&device->checkpoint_name_lock), 0);
+#else
+    __atomic_store_n(&device->checkpoint_name_lock, 0u, __ATOMIC_RELEASE);
+#endif
+    return index;
+}
+
+} // namespace
+
 void begin_debug_label(CommandBuffer* commands, const char* name) noexcept
 {
     Device* device = commands->state;
     if (device->cmd_set_checkpoint && name)
     {
-        // The name's index (interned once; recording is on one thread a device); past the capacity, the last slot stands for the rest
+        // The name's index, interned once (pools record concurrently: the lookup takes no lock, a new name intern_checkpoint_name's);
+        // past the capacity, the last slot stands for the rest
+        const uint32 published = published_checkpoint_names(device);
         uint32 index = 0;
-        while (index < device->checkpoint_name_count && strncmp(device->checkpoint_names[index], name, Device::checkpoint_name_bytes - 1) != 0)
-            ++index;
-        if (index == device->checkpoint_name_count && index < Device::checkpoint_name_capacity)
-        {
-            for (uint32 byte = 0; byte < Device::checkpoint_name_bytes - 1 && name[byte]; ++byte)
-                device->checkpoint_names[index][byte] = name[byte];
-            ++device->checkpoint_name_count;
-        }
+        while (index < published && strncmp(device->checkpoint_names[index], name, Device::checkpoint_name_bytes - 1) != 0) ++index;
+        if (index == published) index = intern_checkpoint_name(device, name, published);
         if (index >= Device::checkpoint_name_capacity) index = Device::checkpoint_name_capacity - 1;
         device->cmd_set_checkpoint(commands->command_buffer, reinterpret_cast<void*>(static_cast<uintptr_t>(index + 1)));
     }
