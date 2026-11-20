@@ -4793,7 +4793,9 @@ void submit_commands(Device* device, const SubmitDesc& desc, uint32 queue_index,
     lock_submissions(device);
     const VkResult submitted = vkQueueSubmit2(queue->queue, 1, &submit_info, fence);
     unlock_submissions(device);
-    check_device_result(device, submitted, "vkQueueSubmit2");
+    // A failed submission is fatal in every build: its timeline value would never be signaled and the next wait would block for ever
+    if (submitted == VK_ERROR_DEVICE_LOST) check_device_result(device, submitted, "vkQueueSubmit2");
+    else if (submitted != VK_SUCCESS) abort_vk_failure(submitted, "vkQueueSubmit2");
     for (size_t index = 0; index < desc.commands.size; ++index) desc.commands.data[index]->submitted = true;
 }
 

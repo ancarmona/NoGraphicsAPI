@@ -531,6 +531,13 @@ if(NOT APPLE)
         NOGRAPHICSAPI_FAILURE_FRAGMENT="${continuation_fragment_spv}")
     add_test(NAME test_startup_failures COMMAND test_startup_failures)
     set_tests_properties(test_startup_failures PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
+    add_executable(test_submit_failure submit_failure_test.cpp)
+    NoGraphicsAPI_disable_exceptions(test_submit_failure)
+    target_compile_features(test_submit_failure PRIVATE cxx_std_20)
+    target_include_directories(test_submit_failure PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_link_libraries(test_submit_failure PRIVATE Vulkan::Vulkan)
+    add_test(NAME test_submit_failure COMMAND test_submit_failure)
+    set_tests_properties(test_submit_failure PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
 
 # Shared shader outputs need one build owner before their independent test executables run custom commands.
