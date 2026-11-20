@@ -99,8 +99,14 @@ void report_vk_failure(VkResult result, const char* operation, bool fatal, uint6
 {
     report_vk_failure(result, operation, true, byte_count);
     // The application's wait for its GPU crash dump (set_device_lost_callback), once, before the abort
-    if (result == VK_ERROR_DEVICE_LOST && device_lost_callback && !__atomic_exchange_n(&device_lost_called, true, __ATOMIC_SEQ_CST))
-        device_lost_callback();
+    if (result == VK_ERROR_DEVICE_LOST && device_lost_callback)
+    {
+#if defined(_MSC_VER) && !defined(__clang__)
+        if (!_InterlockedExchange8(reinterpret_cast<volatile char*>(&device_lost_called), 1)) device_lost_callback();
+#else
+        if (!__atomic_exchange_n(&device_lost_called, true, __ATOMIC_SEQ_CST)) device_lost_callback();
+#endif
+    }
     assert(result == VK_SUCCESS && "unexpected Vulkan failure");
     abort();
 }
