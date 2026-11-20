@@ -360,9 +360,11 @@ fits one granularity block at the mip edge. Compute upload callbacks require a g
 
 Each `(device, queue_index)` and command pool is externally synchronized, including command recording within the pool.
 Distinct resource creation, immutable queries, timeline waits, and descriptor writes to disjoint slots
-can run concurrently on one device. Texture creation records its `UNDEFINED` to `GENERAL` transition
-in the supplied command buffer; every use must follow that initialization. Resource lifetime and
-mutable utility allocators remain caller-synchronized. No internal queue or pool locks are used. One device-wide exception is a
+can run concurrently on one device. Texture creation records no GPU command: `initialize_texture` records its `UNDEFINED` to
+`GENERAL` transition, and every use must follow it. Resource lifetime and
+mutable utility allocators remain caller-synchronized. No internal queue or pool locks are used. A debug label's checkpoint name
+(`VK_NV_device_diagnostic_checkpoints`) is looked up without a lock; a name seen for the first time on the device is added under a
+spin lock held for that insert only, so pools may record labels concurrently. One device-wide exception is a
 driver workaround: a device with several queue families serializes `vkQueueSubmit2` and `vkQueuePresentKHR` with a spin lock
 held for that call only ([repro](repro-queue-device-lost.md#workaround)); `NGA_SUBMIT_LOCK=0` turns it off to retest a driver.
 
