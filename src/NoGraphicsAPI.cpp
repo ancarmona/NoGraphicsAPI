@@ -3337,9 +3337,11 @@ SwapchainFrame acquire(CommandBuffer* commands) noexcept
         swapchain->acquired = true;
         swapchain->recreate_required = result == VK_SUBOPTIMAL_KHR && swapchain_surface_configuration_changed(*swapchain);
         device->acquired_swapchain = swapchain;
+        // Its first scope is the acquire semaphore's wait stage (ALL_COMMANDS, submit_commands): the layout transition is ordered after
+        // the wait (a NONE first scope gives it no dependency chain to the wait)
         const VkImageMemoryBarrier2 barrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+            .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
             .oldLayout = swapchain->initialized[image_index] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED,
