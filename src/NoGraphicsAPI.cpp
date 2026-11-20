@@ -1292,7 +1292,7 @@ void check_device_result(Device* device, VkResult result, const char* operation)
             device->get_checkpoint_data(device->queues[queue_index].queue, &count, checkpoints);
             for (uint32 index = 0; index < count; ++index)
             {
-                const uintptr_t marker = reinterpret_cast<uintptr_t>(checkpoints[index].pCheckpointMarker);
+                const uintptr marker = reinterpret_cast<uintptr>(checkpoints[index].pCheckpointMarker);
                 const char* name = marker >= 1 && marker <= published_checkpoint_names(device) ? device->checkpoint_names[marker - 1] : "(none)";
                 char message[256];
                 snprintf(message, sizeof(message), "lost device, queue %u: the last checkpoint %s: %s", queue_index,
@@ -1607,7 +1607,7 @@ struct Swapchain
     VkColorSpaceKHR color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
     bool relative_present = false;
-    uint64_t time_domain_id = 0;
+    uint64 time_domain_id = 0;
     VkSurfaceTransformFlagBitsKHR transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     VkCompositeAlphaFlagBitsKHR composite_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     detail::PresentContext* present_context = nullptr;
@@ -2561,7 +2561,7 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     if (calibrated_extension)
     {
         const bool khr = strcmp(calibrated_extension, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0;
-        const auto get_domains = load_instance_proc<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR>(state->instance,
+        const PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR get_domains = load_instance_proc<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR>(state->instance,
             khr ? "vkGetPhysicalDeviceCalibrateableTimeDomainsKHR" : "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT");
         state->get_calibrated_timestamps = load_device_proc<PFN_vkGetCalibratedTimestampsKHR>(state->device,
             khr ? "vkGetCalibratedTimestampsKHR" : "vkGetCalibratedTimestampsEXT");
@@ -4509,7 +4509,7 @@ void begin_debug_label(CommandBuffer* commands, const char* name) noexcept
         while (index < published && strncmp(device->checkpoint_names[index], name, Device::checkpoint_name_bytes - 1) != 0) ++index;
         if (index == published) index = intern_checkpoint_name(device, name, published);
         if (index >= Device::checkpoint_name_capacity) index = Device::checkpoint_name_capacity - 1;
-        device->cmd_set_checkpoint(commands->command_buffer, reinterpret_cast<void*>(static_cast<uintptr_t>(index + 1)));
+        device->cmd_set_checkpoint(commands->command_buffer, reinterpret_cast<void*>(static_cast<uintptr>(index + 1)));
     }
     if (!device->cmd_begin_label) return;
     const VkDebugUtilsLabelEXT label{.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, .pLabelName = name};
