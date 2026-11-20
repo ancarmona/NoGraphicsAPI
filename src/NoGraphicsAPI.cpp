@@ -3805,7 +3805,7 @@ SamplerDescriptorHeap* create_sampler_descriptor_heap(Device* device, uint32 cap
         delete heap;
         return nullptr;
     }
-    heap->descriptors = new byte[uint64(capacity) * device->heap_properties.samplerDescriptorSize];
+    heap->descriptors = new byte[uint64(capacity) * device->heap_properties.samplerDescriptorSize]{};
     if (!device->descriptor_heap) heap->objects = new DescriptorObject*[capacity]{};
     return heap;
 }
