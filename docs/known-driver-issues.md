@@ -15,6 +15,18 @@ no intermediate timeline wait, passed 50 runs in each Debug/Release address-comm
 A timeline wait between separate upload and readback submissions works. The parallel texture and
 pitch-roundtrip tests retain this workaround. No driver-specific barrier widening is applied by the graphics API.
 
+## NVIDIA 621.24: a texture past 4 GiB of its memory is bound 4 GiB lower
+
+Found on Windows with an RTX 4090 and NVIDIA 621.24 on 2026-11-20 (Surfbird T241). One `VkDeviceMemory` of more than 4 GiB
+(`maxMemoryAllocationSize` is unlimited there), texture A bound at offset 0 and texture B, the same 1024 x 1024 `r32_uint`, bound at offset
+4 GiB with `vkBindImageMemory` (a 64-bit offset). After an upload to A, then one to B, then readbacks, every texel of A holds B's data: B
+uses the memory 4 GiB lower. The control, B ending exactly at 4 GiB, keeps both. In Surfbird's 4.8 GiB frame texture heap a texture
+written by a compute pass at offset 4.18 GiB damaged the visibility buffer at 0.18 GiB.
+
+The root cause is not vendor-confirmed; only offsets at and past 4 GiB were seen to fail. `create_texture` now refuses, with an error, a
+texture whose bytes end past 4 GiB of its heap (a texture across 4 GiB too, as a margin), and returns null; `test_texture_heap_4g` checks
+the control and the refusals. An application with more than 4 GiB of textures uses several texture heaps.
+
 ## NVIDIA 596.99 to 621.24: concurrent submissions to several queue families lose the device
 
 The failure observed on NVIDIA 596.99 persists on Windows with an RTX 4090 and NVIDIA 617.14 and 621.24.

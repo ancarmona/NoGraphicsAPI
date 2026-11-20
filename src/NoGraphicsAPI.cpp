@@ -3522,6 +3522,19 @@ Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHe
     assert(device && heap.owner && heap.owner->state == device);
     PreparedTexture texture{};
     prepare_texture(*device, desc, texture);
+    // NVIDIA 621.24 binds a texture at or past byte 4 GiB of its memory 4 GiB lower (docs/known-driver-issues.md): refused, never placed
+    const uint64 texture_end = offset + image_memory_requirements(*device, texture.image_info).size;
+    if (texture_end > (uint64(1) << 32))
+    {
+        if (error_callback)
+        {
+            char message[256];
+            snprintf(message, sizeof(message), "create_texture refused: bytes %llu to %llu of its heap are past 4 GiB, where NVIDIA binds a texture "
+                "4 GiB lower (docs/known-driver-issues.md).", (unsigned long long)offset, (unsigned long long)texture_end);
+            error_callback(message, false);
+        }
+        return nullptr;
+    }
 
     Texture* result = new Texture{
         .state = device,

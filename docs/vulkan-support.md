@@ -175,7 +175,8 @@ Texture upload and readback go through buffer-backed `GpuRange` values with
 with its submission timeline.
 
 `create_texture(device, desc, heap, offset)` creates and binds an image without recording GPU commands.
-Views and descriptors can be created immediately. Before first GPU use, call `initialize_texture(commands, texture)`
+It refuses, with an error and a null result, a texture whose bytes end past 4 GiB of its heap (an NVIDIA driver fault,
+[known driver issues](known-driver-issues.md)). Views and descriptors can be created immediately. Before first GPU use, call `initialize_texture(commands, texture)`
 outside rendering to initialize its metadata with a whole-image `UNDEFINED` to `GENERAL` transition.
 This discards contents; clear or overwrite the texture before reading it.
 
