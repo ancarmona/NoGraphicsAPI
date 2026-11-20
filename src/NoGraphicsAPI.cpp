@@ -1249,10 +1249,59 @@ Device::~Device()
 namespace
 {
 
+const char* checkpoint_stage_name(VkPipelineStageFlagBits stage) noexcept
+{
+    switch (stage)
+    {
+    case VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: return "started (top of pipe)";
+    case VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: return "finished before it (bottom of pipe)";
+    default: return "another stage";
+    }
+}
+
+// A lost device, in every build (assert_vk is silent in release builds): the last checkpoints each queue reached (the debug labels'
+// begins, VK_NV_device_diagnostic_checkpoints), then the fatal report and abort; other failures keep assert_vk's behavior. Every
+// submission, present and wait of the backend checks its result here
+void check_device_result(Device* device, VkResult result, const char* operation) noexcept
+{
+    if (result != VK_ERROR_DEVICE_LOST)
+    {
+        assert_vk(result);
+        return;
+    }
+    if (error_callback && device->get_checkpoint_data)
+    {
+        for (uint32 queue_index = 0; queue_index < device->queue_count; ++queue_index)
+        {
+            VkCheckpointDataNV checkpoints[16];
+            for (VkCheckpointDataNV& checkpoint : checkpoints) checkpoint = {.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV};
+            uint32 count = 16;
+            device->get_checkpoint_data(device->queues[queue_index].queue, &count, checkpoints);
+            for (uint32 index = 0; index < count; ++index)
+            {
+                const uintptr_t marker = reinterpret_cast<uintptr_t>(checkpoints[index].pCheckpointMarker);
+                const char* name = marker >= 1 && marker <= device->checkpoint_name_count ? device->checkpoint_names[marker - 1] : "(none)";
+                char message[256];
+                snprintf(message, sizeof(message), "lost device, queue %u: the last checkpoint %s: %s", queue_index,
+                         checkpoint_stage_name(checkpoints[index].stage), name);
+                error_callback(message, false);
+            }
+            if (count == 0)
+            {
+                char message[128];
+                snprintf(message, sizeof(message), "lost device, queue %u: no checkpoint data", queue_index);
+                error_callback(message, false);
+            }
+        }
+    }
+    abort_vk_failure(result, operation);
+}
+
 uint64 query_timeline_value(const TimelineSemaphore& semaphore) noexcept
 {
     uint64 value = 0;
-    assert_vk(vkGetSemaphoreCounterValue(semaphore.state->device, semaphore.semaphore, &value));
+    check_device_result(semaphore.state, vkGetSemaphoreCounterValue(semaphore.state->device, semaphore.semaphore, &value),
+                        "vkGetSemaphoreCounterValue");
     return value;
 }
 
@@ -1263,7 +1312,7 @@ void Device::poll_presentation_retirement() noexcept
     if (!presentation_retirement || completed_presentation_retirement == presentation_retirement_value)
         return;
     uint64 completed = 0;
-    assert_vk(vkGetSemaphoreCounterValue(device, presentation_retirement, &completed));
+    check_device_result(this, vkGetSemaphoreCounterValue(device, presentation_retirement, &completed), "vkGetSemaphoreCounterValue");
     assert(completed >= completed_presentation_retirement && completed <= presentation_retirement_value);
     if (completed == completed_presentation_retirement)
         return;
@@ -1285,7 +1334,7 @@ void Device::wait_presentation_retirement(uint64 value) noexcept
         .pSemaphores = &presentation_retirement,
         .pValues = &value,
     };
-    assert_vk(vkWaitSemaphores(device, &wait_info, ~uint64{0}));
+    check_device_result(this, vkWaitSemaphores(device, &wait_info, ~uint64{0}), "vkWaitSemaphores (presentation retirement)");
     completed_presentation_retirement = value;
     swapchain_delete_queue.collect(device, completed_presentation_retirement);
 }
@@ -1359,7 +1408,7 @@ void Device::wait_present_context(detail::PresentContext& context) noexcept
 {
     if (!context.present_pending)
         return;
-    assert_vk(vkWaitForFences(device, 1, &context.presented, VK_TRUE, ~uint64{0}));
+    check_device_result(this, vkWaitForFences(device, 1, &context.presented, VK_TRUE, ~uint64{0}), "vkWaitForFences (present)");
     context.present_pending = false;
     finish_present_context(context);
 }
@@ -1374,7 +1423,7 @@ void Device::poll_present_contexts() noexcept
         const VkResult result = vkGetFenceStatus(device, context.presented);
         if (result == VK_NOT_READY)
             continue;
-        assert_vk(result);
+        check_device_result(this, result, "vkGetFenceStatus (present)");
         context.present_pending = false;
         finish_present_context(context);
     }
@@ -2743,58 +2792,6 @@ void signal_timeline(TimelinePoint point) noexcept
     assert_vk(vkSignalSemaphore(point.semaphore->state->device, &signal));
 }
 
-namespace
-{
-
-const char* checkpoint_stage_name(VkPipelineStageFlagBits stage) noexcept
-{
-    switch (stage)
-    {
-    case VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: return "started (top of pipe)";
-    case VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: return "finished before it (bottom of pipe)";
-    default: return "another stage";
-    }
-}
-
-// A lost device, in every build (assert_vk is silent in release builds): the last checkpoints each queue reached (the debug labels'
-// begins, VK_NV_device_diagnostic_checkpoints), then the fatal report and abort; other failures keep assert_vk's behavior
-void check_device_result(Device* device, VkResult result, const char* operation) noexcept
-{
-    if (result != VK_ERROR_DEVICE_LOST)
-    {
-        assert_vk(result);
-        return;
-    }
-    if (error_callback && device->get_checkpoint_data)
-    {
-        for (uint32 queue_index = 0; queue_index < device->queue_count; ++queue_index)
-        {
-            VkCheckpointDataNV checkpoints[16];
-            for (VkCheckpointDataNV& checkpoint : checkpoints) checkpoint = {.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV};
-            uint32 count = 16;
-            device->get_checkpoint_data(device->queues[queue_index].queue, &count, checkpoints);
-            for (uint32 index = 0; index < count; ++index)
-            {
-                const uintptr_t marker = reinterpret_cast<uintptr_t>(checkpoints[index].pCheckpointMarker);
-                const char* name = marker >= 1 && marker <= device->checkpoint_name_count ? device->checkpoint_names[marker - 1] : "(none)";
-                char message[256];
-                snprintf(message, sizeof(message), "lost device, queue %u: the last checkpoint %s: %s", queue_index,
-                         checkpoint_stage_name(checkpoints[index].stage), name);
-                error_callback(message, false);
-            }
-            if (count == 0)
-            {
-                char message[128];
-                snprintf(message, sizeof(message), "lost device, queue %u: no checkpoint data", queue_index);
-                error_callback(message, false);
-            }
-        }
-    }
-    abort_vk_failure(result, operation);
-}
-
-} // namespace
-
 void wait_timeline(TimelinePoint point) noexcept
 {
     TimelineSemaphore* semaphore = point.semaphore;
@@ -2879,7 +2876,7 @@ void retire_swapchain_handle(Swapchain& swapchain) noexcept
     if (!device->swapchain_maintenance)
     {
         // Core WSI has no present-completion fence. Restrict the conventional idle wait to retirement.
-        assert_vk(vkQueueWaitIdle(device->queues[0].queue));
+        check_device_result(device, vkQueueWaitIdle(device->queues[0].queue), "vkQueueWaitIdle (swapchain retirement)");
         device->drain_contexts();
         for (uint32 index = 0; index < swapchain.image_count; ++index)
         {
@@ -4827,7 +4824,7 @@ void wait_idle(Device* device) noexcept
 {
     assert(device && "wait_idle called with a null device");
     assert(!device->acquired_swapchain && "wait_idle is not allowed while a swapchain image is acquired");
-    assert_vk(vkDeviceWaitIdle(device->device));
+    check_device_result(device, vkDeviceWaitIdle(device->device), "vkDeviceWaitIdle");
     device->drain_contexts();
     device->next_present_context = 0;
 }
