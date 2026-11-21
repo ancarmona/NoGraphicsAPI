@@ -103,7 +103,7 @@ machine in use.
 ## Workaround
 
 A device with several queue families serializes `vkQueueSubmit2` and `vkQueuePresentKHR` with a spin lock held for that call
-only (`lock_submissions` in the Vulkan backend). The queues still execute concurrently. `NGA_SUBMIT_LOCK=0` turns it off,
+only (`lock_submissions` in the Vulkan backend). The queues still execute concurrently. `DeviceDesc::serialize_submissions = false` turns it off,
 to check whether a new driver fixes the failure; remove the workaround once it does.
 
 With the lock, Release `test_queue_family_threads`: 150 of 150 launches passed. Its cost, measured with the general and copy

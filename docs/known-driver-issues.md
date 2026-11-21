@@ -45,7 +45,7 @@ sequential address-copy runs passed 50 repetitions each; these controls do not e
 This points to an NVIDIA driver issue independent of the library implementation, not a confirmed
 NoGraphicsAPI defect. The root cause is not vendor-confirmed. The 2026-11-16 retest on 621.24 narrowed it: two threads calling
 `vkQueueSubmit2` at the same time on the general and compute families are enough, and a lock around that call alone stops it.
-The Vulkan backend now takes such a lock on devices with several queue families (`NGA_SUBMIT_LOCK=0` turns it off).
+The Vulkan backend now takes such a lock on devices with several queue families (`DeviceDesc::serialize_submissions = false` turns it off).
 See the [standalone repro, test results and workaround](repro-queue-device-lost.md).
 
 ## Metal 4 / macOS 26.6.2: render timestamps leave counter entries unwritten

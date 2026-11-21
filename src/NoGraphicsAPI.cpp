@@ -560,7 +560,7 @@ struct DeviceFunctions
     PFN_vkDestroyAccelerationStructureKHR destroy_acceleration_structure = nullptr;
     PFN_vkGetAccelerationStructureDeviceAddressKHR get_acceleration_structure_address = nullptr;
     PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_acceleration_structures = nullptr;
-    // NGA_PIPELINE_STATISTICS=1 (Vulkan, debug): VK_KHR_pipeline_executable_properties
+    // DeviceDesc::pipeline_executable_statistics (Vulkan, debug): VK_KHR_pipeline_executable_properties
     PFN_vkGetPipelineExecutablePropertiesKHR get_pipeline_executable_properties = nullptr;
     PFN_vkGetPipelineExecutableStatisticsKHR get_pipeline_executable_statistics = nullptr;
 };
@@ -755,7 +755,8 @@ struct PresentContext
 
 struct Device
 {
-    // NGA_PIPELINE_STATISTICS=1: each pipeline is created with CAPTURE_STATISTICS and its executables' statistics go to stderr
+    // DeviceDesc::pipeline_executable_statistics: each pipeline is created with CAPTURE_STATISTICS and its executables' statistics go
+    // to stderr
     bool pipeline_statistics = false;
     // Driver workaround (docs/repro-queue-device-lost.md): with several queue families, queue submissions and presents take this lock
     bool serialize_submissions = false;
@@ -801,7 +802,7 @@ struct Device
     // VK_EXT_debug_utils command labels, for tools (Nsight, RenderDoc); null without the extension
     PFN_vkCmdBeginDebugUtilsLabelEXT cmd_begin_label = nullptr;
     PFN_vkCmdEndDebugUtilsLabelEXT cmd_end_label = nullptr;
-    // VK_NV_device_diagnostic_checkpoints (NGA_CHECKPOINTS=0 turns it off): each debug label's begin also sets a checkpoint whose marker
+    // VK_NV_device_diagnostic_checkpoints (DeviceDesc::gpu_checkpoints): each debug label's begin also sets a checkpoint whose marker
     // is its name's index here plus one; on a lost device the last checkpoints each queue reached are reported (the pass the GPU hung in)
     PFN_vkCmdSetCheckpointNV cmd_set_checkpoint = nullptr;
     PFN_vkGetQueueCheckpointDataNV get_checkpoint_data = nullptr;
@@ -2491,34 +2492,19 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
                 ? VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME : VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
     }
 #endif
-    // NGA_PIPELINE_STATISTICS=1: the driver's statistics per pipeline executable (registers, spills, instructions on NVIDIA)
+    // DeviceDesc::pipeline_executable_statistics: the driver's statistics per pipeline executable (registers, spills, instructions on
+    // NVIDIA)
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executable_features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
         .pNext = &enabled_features.core,
         .pipelineExecutableInfo = VK_TRUE,
     };
-    {
-#if defined(_WIN32)
-        const wchar_t* value = _wgetenv(L"NGA_PIPELINE_STATISTICS");
-        state->pipeline_statistics = value && value[0] == L'1';
-#endif
-    }
-    {
-        // NGA_SUBMIT_LOCK=0 turns the driver workaround off, to retest the driver
-        state->serialize_submissions = state->queue_family_count > 1;
-#if defined(_WIN32)
-        const wchar_t* value = _wgetenv(L"NGA_SUBMIT_LOCK");
-        if (value && value[0] == L'0') state->serialize_submissions = false;
-#endif
-    }
+    state->pipeline_statistics = desc.pipeline_executable_statistics;
+    // DeviceDesc::serialize_submissions off turns the driver workaround off, to retest the driver
+    state->serialize_submissions = desc.serialize_submissions && state->queue_family_count > 1;
     if (state->pipeline_statistics)
         enabled_device_extensions[enabled_device_extension_count++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
-    {
-#if defined(_WIN32)
-        const wchar_t* value = _wgetenv(L"NGA_CHECKPOINTS");
-        if (value && value[0] == L'0') checkpoints_extension = false;
-#endif
-    }
+    checkpoints_extension = checkpoints_extension && desc.gpu_checkpoints;
     if (checkpoints_extension)
         enabled_device_extensions[enabled_device_extension_count++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
     // GPU crash dumps (DeviceDesc::gpu_crash_dumps, the application's Aftermath on): the driver's data for them
@@ -2743,6 +2729,9 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         .max_mesh_multiview_view_count = selected.multiview_mesh_shader ? selected.mesh_properties.maxMeshMultiviewViewCount : 0u,
         .max_sampler_anisotropy = limits.maxSamplerAnisotropy,
         .ray_query = selected.ray_query,
+        .pipeline_executable_statistics = state->pipeline_statistics,
+        .serialize_submissions = state->serialize_submissions,
+        .gpu_checkpoints = state->cmd_set_checkpoint != nullptr,
     };
     if (presentation)
     {
@@ -4071,7 +4060,7 @@ static void count_pipeline(Device* device, const VkPipelineCreationFeedback& fee
 #endif
 }
 
-// NGA_PIPELINE_STATISTICS=1: one line per executable statistic, "NGA_STAT <entry> <executable> <name> = <value>" on stderr
+// DeviceDesc::pipeline_executable_statistics: one line per executable statistic, "NGA_STAT <entry> <executable> <name> = <value>" on stderr
 static void report_pipeline_statistics(Device* device, VkPipeline pipeline, const char* entry) noexcept
 {
     if (!device->pipeline_statistics)

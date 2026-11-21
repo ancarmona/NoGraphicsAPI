@@ -517,6 +517,11 @@ struct DeviceCaps
     // Acceleration structures and inline ray queries in every shader stage (Vulkan: VK_KHR_acceleration_structure, VK_KHR_ray_query).
     // False on Metal for now, and on Vulkan devices without the extensions.
     bool ray_query = false;
+    // What the device took of DeviceDesc's switches (Vulkan; false on Metal): the statistics per pipeline executable, the
+    // serialized submissions, NVIDIA's checkpoints.
+    bool pipeline_executable_statistics = false;
+    bool serialize_submissions = false;
+    bool gpu_checkpoints = false;
 };
 
 enum class ColorSpace : uint32 { srgb, extended_srgb_linear };
@@ -557,6 +562,15 @@ struct DeviceDesc
     // dumps' data (Vulkan: VK_NV_device_diagnostics_config with automatic checkpoints, resource tracking, shader debug information
     // and shader error reporting) when the driver has it.
     bool gpu_crash_dumps = false;
+    // Vulkan only. The driver's statistics per pipeline executable (VK_KHR_pipeline_executable_properties: registers, spills and
+    // instructions on NVIDIA), one "NGA_STAT" line each on stderr when a pipeline is made. A debugging aid: off by default.
+    bool pipeline_executable_statistics = false;
+    // Vulkan only. The multi-queue device-loss workaround (docs/repro-queue-device-lost.md): with several queue families, every
+    // submission and present takes one lock. On by default; off only to retest a driver.
+    bool serialize_submissions = true;
+    // Vulkan only. NVIDIA's diagnostic checkpoints (VK_NV_device_diagnostic_checkpoints) when the driver has them: each debug
+    // label's begin sets one, and a lost device reports the last one each queue reached. On by default.
+    bool gpu_checkpoints = true;
 };
 
 // The native objects of a Vulkan device, for interop (OpenXR's XrGraphicsBindingVulkan2KHR). Null on Metal.

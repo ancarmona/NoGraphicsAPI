@@ -367,7 +367,7 @@ mutable utility allocators remain caller-synchronized. No internal queue or pool
 (`VK_NV_device_diagnostic_checkpoints`) is looked up without a lock; a name seen for the first time on the device is added under a
 spin lock held for that insert only, so pools may record labels concurrently. One device-wide exception is a
 driver workaround: a device with several queue families serializes `vkQueueSubmit2` and `vkQueuePresentKHR` with a spin lock
-held for that call only ([repro](repro-queue-device-lost.md#workaround)); `NGA_SUBMIT_LOCK=0` turns it off to retest a driver.
+held for that call only ([repro](repro-queue-device-lost.md#workaround)); `DeviceDesc::serialize_submissions = false` turns it off to retest a driver.
 
 Public timeline semaphores are the application's reuse mechanism. Poll or wait for the point that
 last used mutable upload data, readback storage, a texture placement, indirect argument memory, or a
